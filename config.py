@@ -1,38 +1,42 @@
 """
-Configuration file for LSTM Multiple Descents Experiment
-Contains all hyperparameters and settings used in the paper
+Configuration file for RNN chaos analysis experiment
 """
-
-# Model hyperparameters (from Table I in paper)
-EMBEDDING_DIM = 32
-LSTM_HIDDEN_SIZE = 60
-NUM_CLASSES = 1  # Binary sentiment classification
-
 # Training parameters
-LEARNING_RATE = 0.0005
-BATCH_SIZE = 32
-MAX_EPOCHS = 1000  # Paper uses 10000, but we start with 1000 for feasibility
-SEQUENCE_LENGTH = 500  # Fixed length for padding/truncating reviews
+BATCH_SIZE = 128
+MAX_EPOCHS = 1000
+SEQUENCE_LENGTH = 500
+EMBEDDING_DIM = 32
+MAX_VOCAB_SIZE = 4000
+NUM_CLASSES = 1
+
+# RNN specific parameters
+HIDDEN_SIZE = 60
+LEARNING_RATE = 0.0001
 
 # Data split
 TRAIN_RATIO = 0.7
 TEST_RATIO = 0.3
 
 # Asymptotic analysis parameters
-ASYMPTOTIC_TIMESTEPS = 1600  # T = 1599 in paper (1600 total)
-REVIEW_TIMESTEPS = 500  # First 500 timesteps use real review data
-ZERO_INPUT_TIMESTEPS = 1100  # Remaining timesteps use zero input (1600-500)
-NUM_TEST_SAMPLES = 500  # Number of test samples for asymptotic analysis
-MACHINE_PRECISION_THRESHOLD = -15  # exp(-15) threshold for numerical precision
+ZERO_INPUT_TIMESTEPS = 2000
+NUM_TEST_SAMPLES = 500
+MACHINE_PRECISION_THRESHOLD = -15
+# Perturbation scale for asymptotic distance analysis (HiddenStateAnalyzer)
+NOISE_SCALE = 1e-6
 START_EPOCH = 1
 END_EPOCH = 1000
 
-# Perturbation parameters
-NOISE_SCALE = 1e-3  # Scale for Gaussian noise perturbation
+# FTLE (Benettin) parameters
+# - eps: initial perturbation magnitude (should be small, but not underflow)
+# - window_length: renormalize every N zero-drive steps
+# - burn_in: skip the first N zero-drive steps when accumulating the exponent
+FTLE_EPS = 1e-6
+FTLE_WINDOW_LENGTH = 10
+FTLE_BURN_IN = 200
 
 # Device and reproducibility
-RANDOM_SEED = 42
-DEVICE = 'cuda'  # Change to 'cpu' if no GPU available
+RANDOM_SEED = 666
+DEVICE = 'cuda'
 
 # File paths
 DATA_PATH = './data/'

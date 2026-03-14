@@ -1,31 +1,35 @@
 import os
 import json
-import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 import warnings
 warnings.filterwarnings('ignore')
 
 import config
+import h5py
+from tqdm import tqdm
+from typing import Any, Dict, Optional
+from seed_utils import HierarchicalSeedManager
 
 class ResultsVisualizer:
-    """Final fixed visualizer"""
-    
-    def __init__(self):
-        self.results = None
+    def __init__(self, seed_manager=None) -> None:
+        self.results: Optional[Dict[str, Any]] = None
+        self.seed_manager = seed_manager or HierarchicalSeedManager(config.RANDOM_SEED)
+        self.bifurcation_rng = self.seed_manager.numpy_rng("visualization.bifurcation.subsample")
+        self.perturbation_rng = self.seed_manager.numpy_rng("visualization.perturbation.subsample")
         self.setup_plotting_style()
         
     def setup_plotting_style(self):
-        """Setup plotting style"""
         plt.style.use('default')
         plt.rcParams.update({
             'font.size': 12,
             'axes.labelsize': 14,
-            'axes.titlesize': 16,
+            'axes.titlesize': 20,
             'xtick.labelsize': 11,
             'ytick.labelsize': 11,
             'legend.fontsize': 10,
-            'figure.titlesize': 18,
+            'figure.titlesize': 20,
             'lines.linewidth': 2,
             'axes.linewidth': 1.5,
             'figure.facecolor': 'white',
@@ -33,20 +37,28 @@ class ResultsVisualizer:
         })
     
     def load_results(self):
-        """Load analysis results"""
-        pickle_path = os.path.join(config.RESULTS_PATH, 'chaos_analysis_results.pkl')
+        h5_path = os.path.join(config.RESULTS_PATH, 'chaos_analysis_results.h5')
         summary_path = os.path.join(config.RESULTS_PATH, 'analysis_summary.json')
         history_path = os.path.join(config.RESULTS_PATH, 'training_history.json')
-        
-        # Try pickle first
-        if os.path.exists(pickle_path):
+
+        print(f"Loading results from h5 file from: {h5_path}")
+        if os.path.exists(h5_path):
             try:
-                with open(pickle_path, 'rb') as f:
-                    self.results = pickle.load(f)
-                print(f"Loaded results from pickle file for {len(self.results['epochs'])} epochs")
+                with h5py.File(h5_path, 'r') as f:
+                    self.results = {}
+                    keep_as_array = {
+                        'analyzed_epochs', 'mean_final_perturbed_distances', 'bifurcation_data', 
+                        'perturbed_distances'
+                    }
+                    for key in f.keys():
+                        if key in keep_as_array:
+                            self.results[key] = f[key][:]  # 保持为 numpy array
+                        else:
+                            self.results[key] = f[key][:].tolist()  # 其他转成 list
+                print(f"Loaded results from h5 file for {len(self.results['epochs'])} epochs")
                 return True
             except Exception as e:
-                print(f"Could not load pickle: {e}")
+                print(f"Could not load h5: {e}")
         
         # Try summary
         if os.path.exists(summary_path):
@@ -54,10 +66,6 @@ class ResultsVisualizer:
                 with open(summary_path, 'r') as f:
                     data = json.load(f)
                 self.results = data.get('training_curves', {})
-                if 'transitions' in data:
-                    self.results['transitions'] = data['transitions']
-                if 'descent_cycles' in data:
-                    self.results['descent_cycles'] = data['descent_cycles']
                 print(f"Loaded results from summary file")
                 return True
             except Exception as e:
@@ -75,9 +83,7 @@ class ResultsVisualizer:
         
         return False
     
-    def plot_multiple_descents_overview(self, save_path=None):
-        """Plot Figure 2(a) reproduction"""
-        
+    def plot_training_curves(self, save_path=None):
         if not self.results:
             print("No results loaded")
             return
@@ -87,79 +93,40 @@ class ResultsVisualizer:
         epochs = self.results.get('epochs', [])
         test_loss = self.results.get('test_loss', [])
         test_accuracy = self.results.get('test_accuracy', [])
+        train_loss = self.results.get('train_loss', [])
+        train_accuracy = self.results.get('train_accuracy', [])
         
         if not epochs or not test_loss:
             print("No training data available")
             return
         
-        # Plot 1: Test loss and asymptotic distances
-        ax1_twin = ax1.twinx()
+        # Plot 1: Loss curves
+        ax1.plot(epochs, train_loss, color='blue', linewidth=1, label='Train Loss', alpha=0.7)
+        ax1.plot(epochs, test_loss, color='brown', linewidth=1, label='Test Loss')
         
-        # Test loss (brown line)
-        ax1.plot(epochs, test_loss, color='brown', linewidth=2, label='Test Loss')
-        ax1.set_ylabel('Test Loss', color='brown', fontsize=14)
-        ax1.tick_params(axis='y', labelcolor='brown')
-        
+        # Mark global optimum
         min_loss_idx = np.argmin(test_loss)
         global_opt_epoch = epochs[min_loss_idx]
+        global_opt_loss = test_loss[min_loss_idx]
         
-        ax1.axvline(x=global_opt_epoch, color='r', linestyle='--', 
-                    label=f"Global Optimum (Epoch {global_opt_epoch})")
+        ax1.plot(global_opt_epoch, global_opt_loss, 'ro', markersize=10, 
+                label=f'Global Optimum (Epoch {global_opt_epoch})')
         
-        # Asymptotic distances (green line) if available
-        plot_chaos_data = False
-        if ('analyzed_epochs' in self.results and 'asymptotic_distances' in self.results):
-            analyzed_epochs = self.results.get('analyzed_epochs', [])
-            asym_distances = self.results.get('asymptotic_distances', [])
-            
-            # Filter valid data
-            valid_data = [(e, d) for e, d in zip(analyzed_epochs, asym_distances) 
-                         if d is not None and not np.isnan(d)]
-            
-            if len(valid_data) > 0:
-                valid_epochs, valid_distances = zip(*valid_data)
-                ax1_twin.plot(valid_epochs, valid_distances, color='green', linewidth=2, 
-                            label='Asymptotic Distance')
-                ax1_twin.set_ylabel('Log Asymptotic Distance', color='green', fontsize=14)
-                ax1_twin.tick_params(axis='y', labelcolor='green')
-                plot_chaos_data = True
-                
-                # # Mark transitions
-                # if 'transitions' in self.results:
-                #     for i, transition in enumerate(self.results['transitions']):
-                #         if transition['transition'] == 'order -> chaos':
-                #             epoch = transition['epoch']
-                #             if epoch <= max(epochs):
-                #                 ax1.axvline(x=epoch, color='red', linestyle='--', alpha=0.7)
-                #                 if i == 0:  # Only label first one
-                #                     ax1.text(epoch + 2, max(test_loss) * 0.9, 
-                #                            f'1st O→C\nEpoch {epoch}', 
-                #                            fontsize=10, color='red')
-        
-        if not plot_chaos_data:
-            ax1.text(0.7, 0.8, 'Chaos analysis data\nnot available\n(Run longer analysis)', 
-                    transform=ax1.transAxes,
-                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8),
-                    fontsize=10)
-        
-        ax1.set_xlabel('Training Epochs', fontsize=14)
-        ax1.set_title('Multiple Descents and Order-Chaos Transitions', fontsize=16)
+        ax1.set_xlabel('Training Epochs', fontsize=16)
+        ax1.set_ylabel('Loss', fontsize=16)
+        ax1.set_title('Training Curves - Loss', fontsize=20)
         ax1.grid(True, alpha=0.3)
+        ax1.legend()
         
-        # Legend
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        if plot_chaos_data:
-            lines2, labels2 = ax1_twin.get_legend_handles_labels()
-            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-        else:
-            ax1.legend()
-        
-        # Plot 2: Test accuracy
-        if test_accuracy:
-            ax2.plot(epochs, test_accuracy, color='blue', linewidth=2, label='Test Accuracy')
-            ax2.set_xlabel('Training Epochs', fontsize=14)
-            ax2.set_ylabel('Accuracy (%)', fontsize=14)
-            ax2.set_title('Test Accuracy Over Training', fontsize=14)
+        # Plot 2: Accuracy curves
+        if test_accuracy and train_accuracy:
+            ax2.plot(epochs, train_accuracy, color='blue', linewidth=1, 
+                    label='Train Accuracy', alpha=0.7)
+            ax2.plot(epochs, test_accuracy, color='brown', linewidth=1, 
+                    label='Test Accuracy')
+            ax2.set_xlabel('Training Epochs', fontsize=16)
+            ax2.set_ylabel('Accuracy (%)', fontsize=16)
+            ax2.set_title('Training Curves - Accuracy', fontsize=20)
             ax2.grid(True, alpha=0.3)
             ax2.legend()
         else:
@@ -174,312 +141,289 @@ class ResultsVisualizer:
         
         plt.show()
     
-    def plot_descent_cycles_analysis(self, save_path=None):
-        """Plot descent cycles with fixed legend"""
+    def plot_test_loss_with_ftle(self, *, save_path: Optional[str] = None) -> None:
+        epochs = np.asarray(self.results.get("epochs", []))
+        test_loss = np.asarray(self.results.get("test_loss", []), dtype=np.float32)
+        analyzed_epochs = np.asarray(self.results.get("analyzed_epochs", []))
+        ftle_mean = np.asarray(self.results.get("ftle_mean", []), dtype=np.float32)
+
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+
+        ax1.plot(epochs, test_loss, color="brown", linewidth=1.2, label="Test Loss")
         
-        if not self.results:
-            print("No results loaded")
-            return
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
-        
-        epochs = self.results.get('epochs', [])
-        test_loss = self.results.get('test_loss', [])
-        
-        if not epochs or not test_loss:
-            ax1.text(0.5, 0.5, 'No training data available', transform=ax1.transAxes,
-                    ha='center', va='center', fontsize=14)
-            return
-        
-        # Plot test loss
-        ax1.plot(epochs, test_loss, color='navy', linewidth=2, label='Test Loss')
-        
-        # Get descent cycles
-        descent_cycles = self.results.get('descent_cycles', [])
-        
-        if len(descent_cycles) > 0:
-            print(f"Plotting {len(descent_cycles)} descent cycles")
-            
-            # Limit colors to avoid legend overflow
-            max_cycles_to_show = 10
-            cycles_to_plot = descent_cycles[:max_cycles_to_show]
-            
-            if len(descent_cycles) > max_cycles_to_show:
-                print(f"Showing first {max_cycles_to_show} of {len(descent_cycles)} cycles")
-            
-            # Use distinct colors
-            colors = plt.cm.tab10(np.linspace(0, 1, min(len(cycles_to_plot), 10)))
-            
-            # Track if we've added legend labels
-            added_peak_label = False
-            added_valley_label = False
-            
-            for i, (cycle, color) in enumerate(zip(cycles_to_plot, colors)):
-                peak_epoch = cycle.get('peak_epoch', 0)
-                valley_epoch = cycle.get('valley_epoch', 0)
-                peak_loss = cycle.get('peak_loss', 0)
-                valley_loss = cycle.get('valley_loss', 0)
-                
-                if peak_epoch > 0 and valley_epoch > 0:
-                    # Highlight descent region (only show first few to avoid clutter)
-                    if i < 5:
-                        ax1.axvspan(peak_epoch, valley_epoch, alpha=0.2, color=color, 
-                                   label=f'Cycle {i+1}' if i < 3 else "")
-                    
-                    # Mark peaks and valleys (only first few)
-                    if i < 8:
-                        ax1.plot(peak_epoch, peak_loss, 'ro', markersize=6,
-                                label='Peak' if not added_peak_label else "")
-                        ax1.plot(valley_epoch, valley_loss, 'go', markersize=6,
-                                label='Valley' if not added_valley_label else "")
-                        added_peak_label = True
-                        added_valley_label = True
-            
-            # Add summary text
-            if len(descent_cycles) > max_cycles_to_show:
-                ax1.text(0.02, 0.95, f'Showing {max_cycles_to_show}/{len(descent_cycles)} cycles\n(Overfitting phase)', 
-                        transform=ax1.transAxes, 
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-                        fontsize=10, verticalalignment='top')
-            
-            # Plot cycle statistics (limit to reasonable number)
-            cycle_lengths = [cycle.get('cycle_length', 0) for cycle in cycles_to_plot]
-            descent_magnitudes = [cycle.get('descent_magnitude', 0) for cycle in cycles_to_plot]
-            cycle_numbers = list(range(1, len(cycles_to_plot) + 1))
-            
-            if cycle_lengths and descent_magnitudes:
-                ax2_twin = ax2.twinx()
-                
-                ax2.bar([x - 0.2 for x in cycle_numbers], cycle_lengths, width=0.4, 
-                       color='skyblue', alpha=0.7, label='Cycle Length (epochs)')
-                ax2_twin.bar([x + 0.2 for x in cycle_numbers], descent_magnitudes, width=0.4,
-                           color='lightcoral', alpha=0.7, label='Descent Magnitude')
-                
-                ax2.set_xlabel('Descent Cycle Number', fontsize=14)
-                ax2.set_ylabel('Cycle Length (epochs)', color='blue', fontsize=14)
-                ax2_twin.set_ylabel('Descent Magnitude', color='red', fontsize=14)
-                ax2.set_title(f'Descent Cycle Characteristics (First {len(cycles_to_plot)} cycles)', fontsize=14)
-                ax2.set_xticks(cycle_numbers)
-                
-                # Combined legend
-                lines1, labels1 = ax2.get_legend_handles_labels()
-                lines2, labels2 = ax2_twin.get_legend_handles_labels()
-                ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-            else:
-                ax2.text(0.5, 0.5, 'No cycle statistics available', 
-                        transform=ax2.transAxes, ha='center', va='center')
-        else:
-            ax1.text(0.7, 0.8, f'No significant descent cycles detected\n(Need overfitting phase)', 
-                    transform=ax1.transAxes, 
-                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
-            ax2.text(0.5, 0.5, 'No descent cycles to analyze', 
-                    transform=ax2.transAxes, ha='center', va='center')
-        
-        ax1.set_xlabel('Training Epochs', fontsize=14)
-        ax1.set_ylabel('Test Loss', fontsize=14)
-        ax1.set_title('Individual Descent Cycles Analysis', fontsize=16)
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')  # Move legend outside
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches='tight')
-            print(f"Saved plot to {save_path}")
-            
-        plt.show()
-    
-    def plot_optimal_epoch_analysis(self, save_path=None):
-        """Plot optimal epochs vs transitions with corrected phase detection"""
-        
-        if not self.results:
-            print("No results loaded")
-            return
-        
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        epochs = self.results.get('epochs', [])
-        test_loss = self.results.get('test_loss', [])
-        
-        if not epochs or not test_loss:
-            ax.text(0.5, 0.5, 'No training data available', transform=ax.transAxes,
-                    ha='center', va='center', fontsize=14)
-            return
-        
-        # Plot test loss
-        ax.plot(epochs, test_loss, color='navy', linewidth=2, label='Test Loss')
-        
-        # Find and mark global optimum
         min_loss_idx = np.argmin(test_loss)
         global_opt_epoch = epochs[min_loss_idx]
-        global_opt_loss = test_loss[min_loss_idx]
+        ax1.axvline(x=global_opt_epoch, color='r', linestyle='--',
+                label=f"Global Optimum (Epoch {global_opt_epoch})")
         
-        ax.plot(global_opt_epoch, global_opt_loss, 'ro', markersize=12, 
-               label=f"Global Optimum (Epoch {global_opt_epoch})")
+        seed = getattr(config, "RANDOM_SEED", None)
+        lr = getattr(config, "LEARNING_RATE", None)
+        ax1.set_xlabel(f"Epochs (seed={seed}, lr={lr})", fontsize=16)
+        ax1.set_ylabel("Test Loss", color="brown", fontsize=16)
+        ax1.tick_params(axis="y", labelcolor="brown")
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlim(0, int(np.max(epochs)))
+
+        ax2 = ax1.twinx()
+        ftle_color = "green"
+        ax2.plot(analyzed_epochs, ftle_mean, color=ftle_color, linewidth=1.2, label="Mean FTLE")
+        ax2.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
+        ax2.set_ylabel("FTLE", color=ftle_color, fontsize=16)
+        ax2.tick_params(axis="y", labelcolor=ftle_color)
         
-        # Mark first order-chaos transition if available
-        transition_found = False
-        first_transition_epoch = None
-        
-        if 'transitions' in self.results and self.results['transitions']:
-            for transition in self.results['transitions']:
-                if transition['transition'] == 'order -> chaos':
-                    trans_epoch = transition['epoch']
-                    if trans_epoch <= len(test_loss):
-                        trans_loss = test_loss[trans_epoch - 1]  # Convert to 0-based
-                        ax.plot(trans_epoch, trans_loss, 'gs', markersize=12,
-                               label=f"First Order→Chaos Transition (Epoch {trans_epoch})")
-                        first_transition_epoch = trans_epoch
-                        transition_found = True
-                        break
-        
-        # Add phase background if available
-        phase_background = False
-        if ('phases' in self.results and 'analyzed_epochs' in self.results and 
-            len(self.results['phases']) > 0):
-            
-            analyzed_epochs = self.results.get('analyzed_epochs', [])
-            phases = self.results.get('phases', [])
-            
-            order_shown = False
-            chaos_shown = False
-            
-            for i, (epoch, phase) in enumerate(zip(analyzed_epochs, phases)):
-                if i < len(analyzed_epochs) - 1:
-                    next_epoch = analyzed_epochs[i + 1]
-                    
-                    if phase == 'order' and not order_shown:
-                        ax.axvspan(epoch, next_epoch, alpha=0.2, color='lightblue', 
-                                  label='Order Phase')
-                        order_shown = True
-                        phase_background = True
-                    elif phase == 'order':
-                        ax.axvspan(epoch, next_epoch, alpha=0.2, color='lightblue')
-                    elif phase == 'chaos' and not chaos_shown:
-                        ax.axvspan(epoch, next_epoch, alpha=0.2, color='lightcoral',
-                                  label='Chaos Phase')
-                        chaos_shown = True  
-                        phase_background = True
-                    elif phase == 'chaos':
-                        ax.axvspan(epoch, next_epoch, alpha=0.2, color='lightcoral')
-        
-        ax.set_xlabel('Training Epochs', fontsize=14)
-        ax.set_ylabel('Test Loss', fontsize=14)
-        ax.set_title('Optimal Epochs and Order-Chaos Transitions', fontsize=16)
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        
-        # Add findings text box
-        textstr = [f"Global Optimum: Epoch {global_opt_epoch} (Loss: {global_opt_loss:.4f})"]
-        
-        if transition_found and first_transition_epoch:
-            textstr.append(f"First O→C Transition: Epoch {first_transition_epoch}")
-            if abs(global_opt_epoch - first_transition_epoch) <= 3:
-                textstr.append("✓ Global optimum near first transition!")
-                textstr.append("(Paper's key finding confirmed)")
-            else:
-                textstr.append("✗ Global optimum differs from first transition")
-                textstr.append("(May need more epochs for full pattern)")
-        else:
-            textstr.append("No order-chaos transitions detected")
-            textstr.append("Note: Need longer chaos analysis")
-        
-        if not phase_background:
-            textstr.append("Phase analysis unavailable")
-        
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-        ax.text(0.02, 0.98, '\n'.join(textstr), transform=ax.transAxes, fontsize=10,
-               verticalalignment='top', bbox=props)
-        
+        ymin, ymax = ax2.get_ylim()
+        ax2.set_ylim(ymin, ymax)
+        ax2.axhspan(0, ymax, alpha=0.05, color="red")   # FTLE > 0
+        ax2.axhspan(ymin, 0, alpha=0.05, color="blue")  # FTLE < 0
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right", framealpha=0.6)
+
+        ax1.set_title("Test Loss vs. FTLE (Benettin)", fontsize=18)
         plt.tight_layout()
-        
+
         if save_path:
-            plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches='tight')
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches="tight")
             print(f"Saved plot to {save_path}")
-            
+
+        plt.show()
+        
+    def plot_mean_final_pt_dists_bifurcation_diagram_with_animation(self, video_path=None,
+                                                                subsample_epochs=1,
+                                                                subsample_samples=100):
+        # ==== 1. 准备数据 ====
+        if not self.results or 'bifurcation_data' not in self.results:
+            print("No bifurcation data available.")
+            return
+
+        epochs = self.results['epochs']
+        test_loss = self.results['test_loss']
+        analyzed_epochs = self.results['analyzed_epochs']
+        mean_final_perturbed_distances = self.results['mean_final_perturbed_distances']
+        bifurcation_data = self.results['bifurcation_data']
+
+        # ==== 2. 创建画布和静态元素 ====
+        fig, ax = plt.subplots(figsize=(16, 8))
+
+        # 测试损失
+        ax.plot(epochs, test_loss, color='brown', linewidth=1, label='Test Loss')
+        ax.set_ylabel('Test Loss', color='brown', fontsize=16)
+        ax.tick_params(axis='y', labelcolor='brown')
+
+        # 全局最优
+        min_loss_idx = np.argmin(test_loss)
+        global_opt_epoch = epochs[min_loss_idx]
+        ax.axvline(x=global_opt_epoch, color='r', linestyle='--',
+                label=f"Global Optimum (Epoch {global_opt_epoch})")
+
+        # 第二轴
+        ax_twin = ax.twinx()
+        ax_twin.set_ylabel('Mean Final Perturbed Distance / Reduced Sum Bifurcation', color='green', fontsize=16) 
+        ax_twin.tick_params(axis='y', labelcolor='green')  # 第二轴刻度颜色
+        
+        # 渐进距离
+        valid_mask = np.isfinite(mean_final_perturbed_distances)
+        
+        if np.any(valid_mask):
+            ax_twin.plot(analyzed_epochs[valid_mask], mean_final_perturbed_distances[valid_mask],
+                        color='green', linewidth=1, label='Mean Final Perturbed Distance')
+
+        # ==== 3. 分岔数据降采样 ====
+        epoch_indices = np.arange(0, analyzed_epochs.size, subsample_epochs)
+        selected_epochs = analyzed_epochs[epoch_indices]
+        selected_bifurcation = bifurcation_data[epoch_indices, :, :]
+
+        sample_indices = self.bifurcation_rng.choice(
+            selected_bifurcation.shape[1],
+            size=min(subsample_samples, selected_bifurcation.shape[1]),
+            replace=False,
+        )
+        selected_bifurcation = selected_bifurcation[:, sample_indices, :]
+
+        n_timesteps = selected_bifurcation.shape[2]
+
+        # ==== 4. 设置坐标轴范围 ====
+        # 展平
+        a_flat = mean_final_perturbed_distances.reshape(-1)
+        b_flat = bifurcation_data.reshape(-1)
+
+        # 合并并去掉 NaN/Inf
+        all_vals = np.concatenate([a_flat, b_flat])
+        finite_vals = all_vals[np.isfinite(all_vals)]
+        y_min, y_max = np.min(finite_vals), np.max(finite_vals)
+        ax_twin.set_ylim(y_min, y_max)
+        ax.set_xlim(selected_epochs.min(), selected_epochs.max())
+
+        # ==== 5. 添加标题、网格、图例（在动画前完成） ====
+        ax.set_xlabel('Epochs', fontsize=16)
+        ax.set_title('Test Loss + Mean Final Perturbed Distance + Bifurcation Map', fontsize=20)
+        ax.grid(True, alpha=0.3)
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax_twin.get_legend_handles_labels()
+        ax.legend(
+            lines1 + lines2,          # 所有曲线对象
+            labels1 + labels2,        # 对应标签
+            loc='lower right',        # 固定在右上角
+            framealpha=0.5            # 图例背景透明度 0~1
+        )
+
+        # ==== 6. 初始化散点和文本 ====
+        scatter = ax_twin.scatter([], [], s=0.3, alpha=0.5, color='#1f77b4', label='Bifurcation Map')
+        timestep_text = ax.text(0.02, 0.98, '', transform=ax.transAxes,
+                                fontsize=16, verticalalignment='top',
+                                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+
+        # ==== 7. 动画函数 ====
+        def init():
+            scatter.set_offsets(np.empty((0, 2)))
+            timestep_text.set_text('')
+            return [scatter, timestep_text]
+
+        def animate(frame):
+            vals = selected_bifurcation[:, :, frame].flatten()
+            xs = np.repeat(selected_epochs, selected_bifurcation.shape[1])
+            scatter.set_offsets(np.column_stack((xs, vals)))
+            timestep_text.set_text(f'Timestep: {frame}')
+            return [scatter, timestep_text]
+
+        # ==== 8. 创建动画 ====
+        print("DEBUG selected_bifurcation shape:", selected_bifurcation.shape)
+        print("DEBUG n_timesteps:", n_timesteps)
+
+        pbar = tqdm(total=n_timesteps, desc="Generating frames")
+
+        def animate_with_pbar(frame):
+            out = animate(frame)   # 调用你原来的 animate
+            pbar.update(1)
+            return out
+
+        frames = list(range(n_timesteps))
+        anim = FuncAnimation(
+            fig, animate_with_pbar, init_func=init,
+            frames=frames, interval=50,
+            blit=True, repeat=False
+        )
+
+        # ==== 9. 保存视频 ====
+        if video_path:
+            writer = FFMpegWriter(fps=20)
+            anim.save(video_path, writer=writer, dpi=100)
+            print(f"Animation saved to {video_path}")
+
+        plt.tight_layout()
         plt.show()
     
-    def plot_bifurcation_diagram(self, save_path=None):
-        """Plot bifurcation diagram with proper data handling"""
+    def create_perturbed_distance_animation(self, save_path=None, subsample_epochs=10, subsample_samples=50):
+        """
+        Create scatter plot animation showing perturbation distances across epochs for each timestep
         
-        if not self.results:
-            print("No results loaded")
+        Args:
+            save_path: Path to save the animation (mov format)
+            subsample_epochs: Sample every N epochs to reduce animation length
+            subsample_samples: Sample N samples to reduce scatter plot density
+        """
+        if not self.results or 'perturbed_distances' not in self.results:
+            print("No perturbed_distances data available. Please ensure 'perturbed_distances' is saved in results.")
             return
         
-        fig, ax = plt.subplots(figsize=(12, 8))
         
-        # Check for bifurcation data
-        has_data = ('analyzed_epochs' in self.results and 
-                   'bifurcation_data' in self.results and 
-                   self.results['bifurcation_data'])
+        perturbed_distances = np.array(self.results['perturbed_distances'])  # Shape: (n_epochs, n_samples, n_timesteps)
+        analyzed_epochs = self.results.get('analyzed_epochs', list(range(1, perturbed_distances.shape[0] + 1)))
         
-        if has_data:
-            analyzed_epochs = self.results['analyzed_epochs']
-            bifurcation_data = self.results['bifurcation_data']
-            
-            all_epochs = []
-            all_values = []
-            
-            for epoch, reduced_sums in zip(analyzed_epochs, bifurcation_data):
-                if isinstance(reduced_sums, list) and len(reduced_sums) > 0:
-                    try:
-                        valid_sums = [x for x in reduced_sums if np.isfinite(x)]
-                        if len(valid_sums) > 10:  # Need reasonable amount of data
-                            all_epochs.extend([epoch] * len(valid_sums))
-                            all_values.extend(valid_sums)
-                    except:
-                        continue
-            
-            if len(all_epochs) > 100:  # Need sufficient data for meaningful plot
-                ax.scatter(all_epochs, all_values, s=0.3, color='blue', alpha=0.4, 
-                          label='Bifurcation Map')
-                
-                # Overlay test loss if available
-                if 'test_loss' in self.results:
-                    test_loss = self.results['test_loss']
-                    loss_epochs = self.results['epochs']
-                    
-                    # Scale to fit
-                    if len(all_values) > 0:
-                        val_range = max(all_values) - min(all_values)
-                        loss_range = max(test_loss) - min(test_loss)
-                        if val_range > 0 and loss_range > 0:
-                            val_min = min(all_values)
-                            loss_min = min(test_loss)
-                            scaled_loss = [val_min + (l - loss_min) * val_range / loss_range 
-                                         for l in test_loss]
-                            ax.plot(loss_epochs, scaled_loss, color='brown', linewidth=2, 
-                                   alpha=0.8, label='Test Loss (scaled)')
-                
-                ax.set_ylabel('Reduced Sum h_T · 1 (normalized)', fontsize=14)
-            else:
-                ax.text(0.5, 0.5, 'Insufficient bifurcation data\n(Need more samples)', 
-                       transform=ax.transAxes, ha='center', va='center',
-                       bbox=dict(boxstyle='round', facecolor='lightyellow'))
-        else:
-            # Show just test loss
-            if 'test_loss' in self.results:
-                ax.plot(self.results['epochs'], self.results['test_loss'], 
-                       color='brown', linewidth=2, label='Test Loss')
-            
-            ax.text(0.5, 0.7, 'Bifurcation analysis not available\n(Limited chaos analysis)', 
-                   transform=ax.transAxes, ha='center', va='center',
-                   bbox=dict(boxstyle='round', facecolor='lightyellow'))
-            ax.set_ylabel('Test Loss', fontsize=14)
+        # Subsample epochs and samples
+        epoch_indices = list(range(0, len(analyzed_epochs), subsample_epochs))
+        selected_epochs = [analyzed_epochs[i] for i in epoch_indices]
+        selected_perturbed_distances = perturbed_distances[epoch_indices, :, :]
         
-        ax.set_xlabel('Training Epochs', fontsize=14)
-        ax.set_title('Bifurcation Diagram and Test Loss', fontsize=16)
+        sample_indices = self.perturbation_rng.choice(
+            perturbed_distances.shape[1],
+            size=min(subsample_samples, perturbed_distances.shape[1]),
+            replace=False,
+        )
+        selected_perturbed_distances = selected_perturbed_distances[:, sample_indices, :]
+        
+        n_timesteps = selected_perturbed_distances.shape[2]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(16, 8))
+        
+        # Set axis limits
+        vmin = selected_perturbed_distances.min()
+        vmax = selected_perturbed_distances.max()
+
+        ax.set_xlim(min(selected_epochs), max(selected_epochs))
+        ax.set_ylim(vmin, vmax)
+        
+        ax.set_xlabel('Epoch', fontsize=16)
+        ax.set_ylabel('Log Perturbation Distance', fontsize=16)
+        ax.set_title('Perturbation Distance Evolution', fontsize=20)
         ax.grid(True, alpha=0.3)
-        ax.legend()
         
-        plt.tight_layout()
+        # 初始化绘图元素
+        scatter = ax.scatter([], [], s=0.5, alpha=0.5, color='green', label='Individual Samples')  # 散点：单个样本
+        mean_line, = ax.plot([], [], color='red', linewidth=1, label='Sample Mean') 
+        timestep_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, 
+                            fontsize=16, verticalalignment='top')
+        ax.legend(loc='upper right') 
         
-        if save_path:
-            plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches='tight')
-            print(f"Saved plot to {save_path}")
+        def init():
+            """Initialize animation"""
+            scatter.set_offsets(np.empty((0, 2)))
+            mean_line.set_data([], [])
+            timestep_text.set_text('')
+            return [scatter, timestep_text]
+        
+        def animate(frame):
+            """Update animation for each frame"""
+            timestep = frame
             
-        plt.show()
+            # Get data for current timestep
+            epoch_data = np.array(selected_epochs)
+            distance_data = selected_perturbed_distances[:, :, timestep].flatten()
+            
+            # Update scatter plot
+            scatter.set_offsets(np.column_stack((epoch_data.repeat(len(sample_indices)), 
+                                              distance_data)))
+            
+            # 对每个epoch，计算该epoch下所有样本在当前时间步的均值（axis=1：按样本维度求平均）
+            sample_mean_per_epoch = np.nanmean(selected_perturbed_distances[:, :, timestep], axis=1)
+            mean_line.set_data(selected_epochs, sample_mean_per_epoch)
+        
+            # Update timestep text
+            timestep_text.set_text(f'Timestep: {timestep}')
+            
+            return [scatter, timestep_text]
+        
+        # ==== 8. 创建动画 ====
+
+        pbar = tqdm(total=n_timesteps, desc="Generating frames")
+
+        def animate_with_pbar(frame):
+            out = animate(frame)   # 调用你原来的 animate
+            pbar.update(1)
+            return out
+
+        frames = list(range(n_timesteps))
+        anim = FuncAnimation(
+            fig, animate_with_pbar, init_func=init,
+            frames=frames, interval=2,
+            blit=True, repeat=False
+        )
     
+        # Save animation
+        if save_path:
+            writer = FFMpegWriter(fps=30)
+            anim.save(save_path, writer=writer, dpi=100)
+            print(f"Animation saved to {save_path}")
+        
+        plt.show()
+        
+        return anim
+    
+
     def generate_all_plots(self):
         """Generate all plots"""
         
@@ -487,32 +431,65 @@ class ResultsVisualizer:
             print("Cannot load results. Please run analysis first.")
             return
         
-        print("Generating visualization plots...")
-        
         figures_dir = os.path.join(config.RESULTS_PATH, 'figures')
         os.makedirs(figures_dir, exist_ok=True)
         
-        plots_to_generate = [
-            ('multiple_descents_overview', self.plot_multiple_descents_overview),
-            ('descent_cycles_analysis', self.plot_descent_cycles_analysis),
-            ('optimal_epoch_analysis', self.plot_optimal_epoch_analysis),
-            ('bifurcation_diagram', self.plot_bifurcation_diagram)
-        ]
-        
-        for plot_name, plot_function in plots_to_generate:
+        # Generate plots
+        print("Generating plots...")
+        plot_name = 'training_curves'
+        try:
+            save_path = os.path.join(figures_dir, f"{plot_name}.png") if config.SAVE_FIGURES else None
+            self.plot_training_curves(save_path=save_path)
+            print(f"✓ Generated {plot_name} plot")
+        except Exception as e:
+            print(f"✗ Failed to generate {plot_name} plot: {str(e)}")
+
+        plot_name = "test_loss_with_ftle"
+        if self.results and all(
+            key in self.results for key in ["epochs", "test_loss", "analyzed_epochs", "ftle_mean"]
+        ):
             try:
-                save_path = os.path.join(figures_dir, f'{plot_name}.png') if config.SAVE_FIGURES else None
-                plot_function(save_path=save_path)
-                print(f"✓ Generated {plot_name}")
+                save_path = os.path.join(figures_dir, f"{plot_name}.png") if config.SAVE_FIGURES else None
+                self.plot_test_loss_with_ftle(save_path=save_path)
+                print(f"✓ Generated {plot_name} plot")
             except Exception as e:
-                print(f"✗ Error generating {plot_name}: {str(e)}")
+                print(f"✗ Failed to generate {plot_name} plot: {str(e)}")
+        
+        # Generate combined animation: Test Loss + Mean Final Perturbed Distance + Bifurcation Map
+        if self.results and all(key in self.results for key in ['bifurcation_data', 'mean_final_perturbed_distances', 'test_loss']):
+            print("\nGenerating combined animation (Test Loss + Mean Final Perturbed Distance + Bifurcation Map)...")
+            try:
+                # 1. 定义视频保存路径（仅当需要保存时生成路径）
+                combined_anim_path = os.path.join(figures_dir, 'combined_bifurcation_animation.mov') if config.SAVE_FIGURES else None
+                
+                # 2. 调用动画函数（核心：只传 video_path，不传 save_path，避免生成静态图）
+                self.plot_mean_final_pt_dists_bifurcation_diagram_with_animation(
+                    video_path=combined_anim_path,  # 只保存视频，不保存静态图
+                    subsample_epochs=1,             # 按需求调整：每隔1个epoch取1个（不丢数据）
+                    subsample_samples=config.NUM_TEST_SAMPLES      # 按需求调整
+                )
+                
+                print("✓ Generated combined animation (Test Loss + Mean Final Perturbed Distance + Bifurcation Map)")
+            except Exception as e:
+                print(f"✗ Error generating combined animation: {str(e)}")
+
+        print(f"\nAnimations saved to {figures_dir}")
+
+        # Generate animations if perturbed_distance data is available
+        if self.results and 'perturbed_distances' in self.results:
+            print("\nGenerating perturbed_distance animations...")
+            
+            try:
+                anim_path = os.path.join(figures_dir, 'perturbed_distance_animation.mov') if config.SAVE_FIGURES else None
+                self.create_perturbed_distance_animation(
+                    save_path=anim_path, 
+                    subsample_epochs=1, 
+                    subsample_samples=config.NUM_TEST_SAMPLES)
+                print("✓ Generated perturbed_distance animation")
+            except Exception as e:
+                print(f"✗ Error generating perturbed_distance animation: {str(e)}")
         
         print(f"\nPlots saved to {figures_dir}")
 
-def main():
-    """Main visualization function"""
-    visualizer = ResultsVisualizer()
-    visualizer.generate_all_plots()
 
-if __name__ == "__main__":
-    main()
+__all__ = ["ResultsVisualizer"]

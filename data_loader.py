@@ -12,10 +12,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from sklearn.model_selection import train_test_split
 from collections import Counter
-import requests
-import zipfile
 from tqdm import tqdm
 import config
+from seed_utils import HierarchicalSeedManager
 
 class IMDBDataset(Dataset):
     """Custom Dataset class for IMDB movie reviews"""
@@ -35,6 +34,7 @@ class IMDBDataset(Dataset):
         
         # Convert text to indices
         indices = self.text_to_indices(text)
+        length = min(len(indices), self.sequence_length)
         
         # Pad or truncate to fixed length
         if len(indices) > self.sequence_length:
@@ -42,7 +42,11 @@ class IMDBDataset(Dataset):
         else:
             indices = indices + [0] * (self.sequence_length - len(indices))
             
-        return torch.tensor(indices, dtype=torch.long), torch.tensor(label, dtype=torch.float)
+        return (
+            torch.tensor(indices, dtype=torch.long),
+            torch.tensor(label, dtype=torch.float),
+            torch.tensor(length, dtype=torch.long)
+        )
     
     def text_to_indices(self, text):
         """Convert text to sequence of vocabulary indices"""
@@ -64,9 +68,11 @@ class IMDBDataset(Dataset):
 class IMDBDataLoader:
     """Data loader for IMDB dataset with preprocessing"""
     
-    def __init__(self):
+    def __init__(self, seed_manager=None):
         self.vocab = None
         self.vocab_size = 0
+        self.embedding_matrix = None
+        self.seed_manager = seed_manager or HierarchicalSeedManager(config.RANDOM_SEED)
         
     def download_data(self):
         """Download IMDB dataset if not already present"""
@@ -109,7 +115,7 @@ class IMDBDataLoader:
             print("Please install the datasets library: pip install datasets")
             raise
     
-    def build_vocabulary(self, texts, max_vocab_size=10000):
+    def build_vocabulary(self, texts, max_vocab_size=config.MAX_VOCAB_SIZE):
         """Build vocabulary from text data"""
         word_counts = Counter()
         
@@ -120,36 +126,50 @@ class IMDBDataLoader:
             word_counts.update(words)
         
         # Get most common words
-        most_common = word_counts.most_common(max_vocab_size - 2)  # Reserve 2 for special tokens
-        
+        most_common = sorted(word_counts.items(), key=lambda x: (-x[1], x[0]))[:max_vocab_size - 2]
+
         # Create vocabulary mapping
         self.vocab = {'<PAD>': 0, '<UNK>': 1}
         for word, _ in most_common:
             self.vocab[word] = len(self.vocab)
         
+        vocab_path = os.path.join(config.DATA_PATH, 'vocab.npy')
+        np.save(vocab_path, self.vocab)
+        print(f"Vocab saved to: {vocab_path}")
+        
         self.vocab_size = len(self.vocab)
         print(f"Vocabulary size: {self.vocab_size}")
         
     def load_data(self):
-        """Load and preprocess IMDB dataset"""
         # Download data if needed
         self.download_data()
         
-        # Load data
         df = pd.read_csv(os.path.join(config.DATA_PATH, 'IMDB_Dataset.csv'))
+        
+        # Check if pre-trained vocabulary exists
+        vocab_path = os.path.join(config.DATA_PATH, 'vocab.npy')
+        if os.path.exists(vocab_path):
+            self.vocab = np.load(vocab_path, allow_pickle=True).item()
+            self.vocab_size = len(self.vocab)
+            print(f"Loaded pre-trained vocabulary: {self.vocab_size} words")
+        else:
+            # Load data and build vocabulary
+            self.build_vocabulary(df['review'].values)
         
         # Convert sentiment to binary labels
         df['label'] = df['sentiment'].map({'positive': 1, 'negative': 0})
         
-        # Build vocabulary
-        self.build_vocabulary(df['review'].values)
+        # If vocabulary wasn't loaded, build it now
+        if self.vocab is None:
+            self.build_vocabulary(df['review'].values)
         
         # Split data
+        split_seed = self.seed_manager.module_seed('data.split')
         X_train, X_test, y_train, y_test = train_test_split(
             df['review'].values,
             df['label'].values,
             test_size=config.TEST_RATIO,
-            random_state=config.RANDOM_SEED,
+            random_state=split_seed,
             stratify=df['label'].values
         )
         
@@ -160,7 +180,9 @@ class IMDBDataLoader:
     
     def create_data_loaders(self, X_train, X_test, y_train, y_test):
         """Create PyTorch data loaders"""
-        
+        train_generator = self.seed_manager.torch_generator('dataloader.shuffle.train')
+        test_generator = self.seed_manager.torch_generator('dataloader.shuffle.test')
+    
         train_dataset = IMDBDataset(X_train, y_train, self.vocab, config.SEQUENCE_LENGTH)
         test_dataset = IMDBDataset(X_test, y_test, self.vocab, config.SEQUENCE_LENGTH)
         
@@ -169,7 +191,8 @@ class IMDBDataLoader:
             batch_size=config.BATCH_SIZE,
             shuffle=True,
             num_workers=4,
-            pin_memory=True if config.DEVICE == 'cuda' else False
+            pin_memory=True if config.DEVICE == 'cuda' else False,
+            generator=train_generator
         )
         
         test_loader = DataLoader(
@@ -177,7 +200,8 @@ class IMDBDataLoader:
             batch_size=config.BATCH_SIZE,
             shuffle=False,
             num_workers=4,
-            pin_memory=True if config.DEVICE == 'cuda' else False
+            pin_memory=True if config.DEVICE == 'cuda' else False,
+            generator=test_generator
         )
         
         return train_loader, test_loader, test_dataset

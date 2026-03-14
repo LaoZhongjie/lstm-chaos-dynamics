@@ -1,6 +1,5 @@
 """
-Training script for LSTM model with checkpointing for chaos analysis
-Implements the training procedure described in the paper
+Training script for lstm model with checkpointing for chaos analysis
 """
 
 import os
@@ -13,27 +12,30 @@ import json
 from datetime import datetime
 
 import config
-from model import SentimentLSTM
+from model import LSTM
 from data_loader import IMDBDataLoader
-from chaos_analysis import ChaosAnalyzer
+from seed_utils import HierarchicalSeedManager
 
 class LSTMTrainer:
-    """Trainer class for LSTM model with comprehensive logging and checkpointing"""
+    """Trainer class for lstm model with comprehensive logging"""
     
-    def __init__(self):
+    def __init__(self, seed_manager=None):
         self.device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
+        print("Training lstm model")
+        self.seed_manager = seed_manager or HierarchicalSeedManager(config.RANDOM_SEED)
         
         # Create directories
         self.create_directories()
         
         # Initialize data loader
-        self.data_loader = IMDBDataLoader()
+        self.data_loader = IMDBDataLoader(seed_manager=self.seed_manager)
         
         # Initialize model, optimizer, and loss function
         self.model = None
         self.optimizer = None
-        self.criterion = nn.BCELoss()
+        # Model returns raw logits (no sigmoid), so use numerically-stable BCE-with-logits.
+        self.criterion = nn.BCEWithLogitsLoss()
         
         # Training history
         self.training_history = {
@@ -41,32 +43,50 @@ class LSTMTrainer:
             'test_loss': [],
             'train_accuracy': [],
             'test_accuracy': [],
-            'epochs': []
+            'epochs': [],
+            'grad_norms': []
         }
+
+    def load_weights_from_checkpoint(self, checkpoint_path):
+        if not os.path.exists(checkpoint_path):
+            print(f"Checkpoint not found: {checkpoint_path}")
+            return None, None
         
-    def create_directories(self):
-        """Create necessary directories for results and checkpoints"""
-        os.makedirs(config.RESULTS_PATH, exist_ok=True)
-        os.makedirs(config.CHECKPOINT_PATH, exist_ok=True)
+        print(f"Loading weights from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        state_dict = checkpoint['model_state_dict']
         
-    def load_data(self):
-        """Load and prepare data"""
-        print("Loading IMDB dataset...")
-        X_train, X_test, y_train, y_test = self.data_loader.load_data()
+        # Extract embedding weights
+        embedding_weights = state_dict['embedding.weight'].cpu().numpy()
         
-        self.train_loader, self.test_loader, self.test_dataset = \
-            self.data_loader.create_data_loaders(X_train, X_test, y_train, y_test)
+        # Extract fc weights
+        fc_weight = state_dict['fc.weight'].cpu().numpy()
+        fc_bias = state_dict['fc.bias'].cpu().numpy()
+        fc_weights = (fc_weight, fc_bias)
         
-        print(f"Vocabulary size: {self.data_loader.vocab_size}")
-        return self.data_loader.vocab_size
+        print(f"Extracted embedding weights: shape {embedding_weights.shape}")
+        print(f"Extracted fc weights: weight shape {fc_weight.shape}, bias shape {fc_bias.shape}")
         
-    def initialize_model(self, vocab_size):
-        """Initialize model and optimizer"""
-        self.model = SentimentLSTM(
+        return embedding_weights, fc_weights
+
+    def initialize_model(self, vocab_size, pretrained_checkpoint=None):
+        embedding_weights = None
+        fc_weights = None
+        
+        # Priority 1: Load from specified checkpoint
+        if pretrained_checkpoint is not None:
+            embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
+            if embedding_weights is not None:
+                print("Using embedding and fc weights from checkpoint")
+        
+        self.model = LSTM(
             vocab_size=vocab_size,
             embedding_dim=config.EMBEDDING_DIM,
-            hidden_size=config.LSTM_HIDDEN_SIZE,
-            num_classes=config.NUM_CLASSES
+            hidden_size=config.HIDDEN_SIZE,
+            num_classes=config.NUM_CLASSES,
+            embedding_weights=embedding_weights,
+            fc_weights=fc_weights,
+            seed_manager=self.seed_manager,
         ).to(self.device)
         
         self.optimizer = optim.Adam(
@@ -74,10 +94,9 @@ class LSTMTrainer:
             lr=config.LEARNING_RATE
         )
         
-        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters())}")
+        print(f"lstm parameters: {sum(p.numel() for p in self.model.parameters())}")
         
     def train_epoch(self, epoch):
-        """Train for one epoch"""
         self.model.train()
         total_loss = 0.0
         correct = 0
@@ -85,30 +104,30 @@ class LSTMTrainer:
         
         progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
         
-        for batch_idx, (data, target) in enumerate(progress_bar):
-            data, target = data.to(self.device), target.to(self.device)
+        for batch_idx, (data, target, lengths) in enumerate(progress_bar):
+            data = data.to(self.device)
+            target = target.to(self.device)
+            lengths = lengths.to(self.device)
             
-            # Forward pass
             self.optimizer.zero_grad()
-            output, _ = self.model(data)
-            output = output.squeeze()  # Remove extra dimension
+            logits, _ = self.model(data, lengths)
+            logits = logits.squeeze(-1)
             
-            loss = self.criterion(output, target)
+            loss = self.criterion(logits, target)
             
-            # Backward pass
             loss.backward()
             self.optimizer.step()
             
-            # Statistics
             total_loss += loss.item()
-            predicted = (output > 0.5).float()
+            
+            probs = torch.sigmoid(logits)
+            predicted = (probs > 0.5).float()
             total += target.size(0)
             correct += (predicted == target).sum().item()
             
-            # Update progress bar
             progress_bar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100.*correct/total:.2f}%'
+                'Acc': f'{100.*correct/total:.2f}%',
             })
         
         avg_loss = total_loss / len(self.train_loader)
@@ -116,48 +135,31 @@ class LSTMTrainer:
         
         return avg_loss, accuracy
     
-    def evaluate(self, epoch, save_wrong_predictions=False):
-        """Evaluate model on test set"""
+    def evaluate(self, epoch):
         self.model.eval()
         total_loss = 0.0
         correct = 0
         total = 0
-        wrong_predictions_info = []
         
         with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(self.test_loader):
-                data, target = data.to(self.device), target.to(self.device)
+            for batch_idx, (data, target, lengths) in enumerate(self.test_loader):
+                data = data.to(self.device)
+                target = target.to(self.device)
+                lengths = lengths.to(self.device)
                 
-                output, _ = self.model(data)
-                output = output.squeeze()
+                logits, _ = self.model(data, lengths)
+                logits = logits.squeeze(-1)
                 
-                loss = self.criterion(output, target)
+                loss = self.criterion(logits, target)
                 total_loss += loss.item()
                 
-                predicted = (output > 0.5).float()
+                probs = torch.sigmoid(logits)
+                predicted = (probs > 0.5).float()
                 total += target.size(0)
                 correct += (predicted == target).sum().item()
-                
-                # Collect wrong predictions for analysis (Section IV of paper)
-                if save_wrong_predictions:
-                    wrong_mask = (predicted != target)
-                    if wrong_mask.sum() > 0:
-                        wrong_indices = torch.where(wrong_mask)[0]
-                        for idx in wrong_indices:
-                            wrong_predictions_info.append({
-                                'batch_idx': batch_idx,
-                                'sample_idx': idx.item(),
-                                'predicted': predicted[idx].item(),
-                                'actual': target[idx].item(),
-                                'output': output[idx].item(),
-                                'loss': self.criterion(output[idx:idx+1], target[idx:idx+1]).item()
-                            })
         
         avg_loss = total_loss / len(self.test_loader)
         accuracy = 100. * correct / total
-        
-        if save_wrong_predictions:
-            return avg_loss, accuracy, wrong_predictions_info
         
         return avg_loss, accuracy
     
@@ -177,7 +179,7 @@ class LSTMTrainer:
         checkpoint_path = os.path.join(config.CHECKPOINT_PATH, f'model_epoch_{epoch}.pt')
         torch.save(checkpoint, checkpoint_path)
         
-        # Also save the best model (lowest test loss)
+        # Save best model
         if not hasattr(self, 'best_test_loss') or test_loss < self.best_test_loss:
             self.best_test_loss = test_loss
             self.best_epoch = epoch
@@ -191,7 +193,7 @@ class LSTMTrainer:
             json.dump(self.training_history, f, indent=2)
     
     def train(self, max_epochs=None):
-        """Main training loop with comprehensive logging"""
+        """Main training loop"""
         if max_epochs is None:
             max_epochs = config.MAX_EPOCHS
             
@@ -212,7 +214,7 @@ class LSTMTrainer:
             self.training_history['train_accuracy'].append(train_acc)
             self.training_history['test_accuracy'].append(test_acc)
             
-            # Save checkpoint every epoch (needed for chaos analysis)
+            # Save checkpoint
             self.save_checkpoint(epoch, train_loss, test_loss, train_acc, test_acc)
             
             # Print epoch summary
@@ -220,7 +222,7 @@ class LSTMTrainer:
                   f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
                   f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%')
             
-            # Save training history periodically
+            # Save history periodically
             if epoch % 10 == 0:
                 self.save_training_history()
         
@@ -231,21 +233,31 @@ class LSTMTrainer:
         self.save_training_history()
         
         return self.training_history
+    
+    def create_directories(self):
+        """Create necessary directories"""
+        os.makedirs(config.RESULTS_PATH, exist_ok=True)
+        os.makedirs(config.CHECKPOINT_PATH, exist_ok=True)
+
+    def load_data(self):
+        print("Loading IMDB dataset...")
+        X_train, X_test, y_train, y_test = self.data_loader.load_data()
+        
+        self.train_loader, self.test_loader, self.test_dataset = \
+            self.data_loader.create_data_loaders(X_train, X_test, y_train, y_test)
+        
+        return self.data_loader.vocab_size
 
 def main():
     """Main training function"""
-    # Set random seeds for reproducibility
-    torch.manual_seed(config.RANDOM_SEED)
-    np.random.seed(config.RANDOM_SEED)
+    seed_manager = HierarchicalSeedManager(config.RANDOM_SEED)
+    seed_manager.apply_global_seed()
     
-    # Initialize trainer
-    trainer = LSTMTrainer()
+    trainer = LSTMTrainer(seed_manager=seed_manager)
     
-    # Load data and initialize model
     vocab_size = trainer.load_data()
     trainer.initialize_model(vocab_size)
     
-    # Train model
     history = trainer.train()
     
     print(f"Training results saved to {config.RESULTS_PATH}")
