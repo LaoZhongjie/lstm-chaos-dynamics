@@ -15,7 +15,7 @@ PRETRAINED_CHECKPOINT = 'checkpoints/pretrained1.pt'
 
 # RNN specific parameters
 HIDDEN_SIZE = 60
-LEARNING_RATE = 0.0001
+LEARNING_RATE = 0.0003
 
 # Data split
 TRAIN_RATIO = 0.7
@@ -35,7 +35,7 @@ FTLE_WINDOW_LENGTH = 10
 FTLE_BURN_IN = 200
 
 # Device and reproducibility
-RANDOM_SEED = 2026
+RANDOM_SEED = 666
 DEVICE = 'cuda'
 
 # File paths

@@ -61,13 +61,13 @@ class LSTMTrainer:
         
         if config.EMBEDDING_FIX:
             embedding_weights = state_dict['embedding.weight'].cpu().numpy()
-            print(f"Extracted embedding weights: shape {embedding_weights.shape}")
+            print(f"[init model]Extracted embedding weights: shape {embedding_weights.shape}")
             
         if config.FC_FIX:
             fc_weight = state_dict['fc.weight'].cpu().numpy()
             fc_bias = state_dict['fc.bias'].cpu().numpy()
             fc_weights = (fc_weight, fc_bias)
-            print(f"Extracted fc weights: weight shape {fc_weight.shape}, bias shape {fc_bias.shape}")
+            print(f"[init model]Extracted fc weights: weight shape {fc_weight.shape}, bias shape {fc_bias.shape}")
         
         return embedding_weights, fc_weights
 

@@ -124,6 +124,7 @@ class ExperimentRunner:
             video_path=combined_anim_gpu_path,
             subsample_epochs=1,
             subsample_samples=config.NUM_TEST_SAMPLES,
+            point_radius=3,
         )
 
         print(f"✓ Visualizations completed. Files saved to {figures_dir}")

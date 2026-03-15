@@ -196,6 +196,7 @@ class ResultsVisualizer:
         dpi: int = 100,
         device: Optional[str] = None,
         point_alpha: float = 0.5,
+        point_radius: int = 2,
         point_color: tuple = (31, 119, 180),
         codec: Optional[str] = None,
         frame_step: int = 2,
@@ -346,7 +347,7 @@ class ResultsVisualizer:
         ax.set_title('Test Loss + Bifurcation Map', fontsize=20)
         ax.grid(True, alpha=0.3)
 
-        ax_twin.scatter([], [], s=0.3, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
+        ax_twin.scatter([], [], s=5, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax_twin.get_legend_handles_labels()
         ax.legend(lines1 + lines2, labels1 + labels2, loc='lower right', framealpha=0.5)
@@ -375,6 +376,9 @@ class ResultsVisualizer:
 
         point_color_np = np.asarray(point_color, dtype=np.float32).reshape(1, 3)
         one_minus_alpha = float(max(0.0, min(1.0, 1.0 - point_alpha)))
+        point_radius = max(1, int(point_radius))
+        kernel_size = 2 * point_radius + 1
+        dilate_kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
 
         try:
             print(f"[gpu_anim] Initializing video writer with codec='{codec}'...", flush=True)
@@ -418,11 +422,19 @@ class ResultsVisualizer:
 
                         ys = (nz // width).cpu().numpy()
                         xs = (nz % width).cpu().numpy()
-                        a = alpha_eff.cpu().numpy().reshape(-1, 1)
+                        alpha_vals = alpha_eff.cpu().numpy()
 
-                        base = frame_rgb[ys, xs, :].astype(np.float32)
-                        blended = (1.0 - a) * base + a * point_color_np
-                        frame_rgb[ys, xs, :] = blended.astype(np.uint8)
+                        alpha_map = np.zeros((height, width), dtype=np.float32)
+                        alpha_map[ys, xs] = np.maximum(alpha_map[ys, xs], alpha_vals)
+                        if point_radius > 1:
+                            alpha_map = cv2.dilate(alpha_map, dilate_kernel, iterations=1)
+
+                        mask = alpha_map > 0
+                        if np.any(mask):
+                            a = alpha_map[mask].reshape(-1, 1)
+                            base = frame_rgb[mask, :].astype(np.float32)
+                            blended = (1.0 - a) * base + a * point_color_np
+                            frame_rgb[mask, :] = blended.astype(np.uint8)
                 else:
                     frame_rgb = background_rgba[:, :, :3].copy()
 

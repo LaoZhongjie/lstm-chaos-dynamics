@@ -16,10 +16,10 @@ class LSTM(nn.Module):
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         if embedding_weights is not None:
-            print("\n[lstm]Embedding Layer: loaded, not trainable... ")
+            print("\n[init model]Embedding Layer: loaded, not trainable... ")
             self.embedding.weight = nn.Parameter(torch.tensor(embedding_weights, dtype=torch.float32), requires_grad=False)
         else:
-            print("\n[lstm]Embedding Layer: uniform init")
+            print("\n[init model]Embedding Layer: uniform init")
             with self.seed_manager.local_seed("model.init.embedding"):
                 nn.init.uniform_(self.embedding.weight, -0.1, 0.1)
             self.embedding.weight.data[0].fill_(0)  # Padding token
@@ -33,18 +33,18 @@ class LSTM(nn.Module):
         
         self.fc = nn.Linear(hidden_size, num_classes)
         if fc_weights is not None:
-            print("[lstm]FC Layer: loaded, not trainable...\n")
+            print("[init model]FC Layer: loaded, not trainable...\n")
             self.fc.weight = nn.Parameter(torch.tensor(fc_weights[0], dtype=torch.float32), requires_grad=False)
             self.fc.bias = nn.Parameter(torch.tensor(fc_weights[1], dtype=torch.float32), requires_grad=False)
         else:
-            print("[lstm]FC Layer: micro normal init...\n")
+            print("[init model]FC Layer: micro normal init...\n")
             with self.seed_manager.local_seed("model.init.fc"):
                 nn.init.normal_(self.fc.weight, mean=0.0, std=1e-2)
             nn.init.zeros_(self.fc.bias)
 
         self._init_recurrent_weights()
         
-    def _init_recurrent_wweights(self):
+    def _init_recurrent_weights(self):
         for name, param in self.lstm.named_parameters():
             if 'weight_hh' in name:
                 hidden_size = param.shape[1]
