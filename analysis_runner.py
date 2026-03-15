@@ -46,8 +46,6 @@ class AnalysisRunner:
             'test_accuracy': [],
             'grad_norms': [],
             'analyzed_epochs': [],
-            'perturbed_distances': [],
-            'mean_final_perturbed_distances': [],
             'bifurcation_data': [],
             'sample_indices': [],
             'ftle_mean': [],
@@ -156,8 +154,6 @@ class AnalysisRunner:
         
         epochs_to_analyze = list(range(start_epoch, min(end_epoch + 1, len(self.results['epochs']) + 1), interval))
         
-        perturbed_distances = []
-        mean_final_perturbed_distances = []
         bifurcation_data = []
         
         ftle_mean = []
@@ -173,28 +169,18 @@ class AnalysisRunner:
                 ftle_per_sample.append(ftle_batch.detach().cpu().numpy())
                 ftle_mean.append(ftle_avg)
                 
-                # Calculate asymptotic distance             
-                h_states_all_samples, h_states_perturbed_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
+                h_states_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
                     self.test_dataset, self.sample_indices, epoch
                 )
 
-                pt_dist, mean_final_pt_dist, reduced_sums = self.hiddenstate_analyzer.analyze_asymptotic_distance(
-                    h_states_all_samples, h_states_perturbed_all_samples
-                )
-                
-                perturbed_distances.append(pt_dist)
-                mean_final_perturbed_distances.append(mean_final_pt_dist)
+                reduced_sums = self.hiddenstate_analyzer.calculate_reduced_sums_normalized(h_states_all_samples)
                 bifurcation_data.append(reduced_sums)
                 
             except FileNotFoundError:
                 print(f"Checkpoint not found for epoch {epoch}")
-                perturbed_distances.append([])
-                mean_final_perturbed_distances.append(None)
                 bifurcation_data.append([])
                 
         self.results['analyzed_epochs'] = epochs_to_analyze
-        self.results['perturbed_distances'] = perturbed_distances
-        self.results['mean_final_perturbed_distances'] = mean_final_perturbed_distances
         self.results['bifurcation_data'] = bifurcation_data
         self.results['sample_indices'] = self.sample_indices
         self.results['ftle_mean'] = ftle_mean
@@ -203,7 +189,7 @@ class AnalysisRunner:
         print(f"Calculated asymptotic distances for {len(epochs_to_analyze)} epochs")
         print("Results saved for manual inspection")
         
-        return epochs_to_analyze, perturbed_distances, mean_final_perturbed_distances, bifurcation_data, ftle_mean, ftle_per_sample
+        return epochs_to_analyze, bifurcation_data, ftle_mean, ftle_per_sample
     
     def save_results(self):
         analyzed_epochs = self.results.get('analyzed_epochs', [])
@@ -245,8 +231,6 @@ class AnalysisRunner:
             'test_accuracy': np.float32,
             'grad_norms': np.float32, 
             'analyzed_epochs': np.int16,
-            'perturbed_distances': np.float32,
-            'mean_final_perturbed_distances': np.float32,
             'bifurcation_data': np.float32,
             'sample_indices': np.int32,
             'ftle_mean': np.float32,

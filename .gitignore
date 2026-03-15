@@ -1,0 +1,45 @@
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache / build
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs / local env
+*.log
+.env
+.env.*
+
+# Project outputs (large / generated)
+results/
+checkpoints/
+data/
+
+# Model / data artifacts
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.npz
+*.npy
+
+# Visualization artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.mov
+*.avi

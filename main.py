@@ -22,6 +22,7 @@ print(f"Device: {torch.device(config.DEVICE if torch.cuda.is_available() else 'c
 print(f"Random seed: {config.RANDOM_SEED}")
 print(f"Learning Rate: {config.LEARNING_RATE}")
 
+
 print(f"Data path: {config.DATA_PATH}")
 print(f"Results path: {config.RESULTS_PATH}")
 print(f"Checkpoints path: {config.CHECKPOINT_PATH}")
@@ -33,7 +34,6 @@ class ExperimentRunner:
         self.setup_experiment()
         
     def setup_experiment(self):
-        print("Setting up experiment...")
         for path in [config.DATA_PATH, config.RESULTS_PATH, config.CHECKPOINT_PATH]:
             os.makedirs(path, exist_ok=True)
         
@@ -50,13 +50,9 @@ class ExperimentRunner:
         try:
             trainer = LSTMTrainer(seed_manager=self.seed_manager)
             vocab_size = trainer.load_data()
-            trainer.initialize_model(
-                vocab_size,
-                # pretrained_checkpoint='checkpoints/pretrained.pt'
-            )
+            trainer.initialize_model(vocab_size)
             
             print(f"Starting LSTM training for {max_epochs} epochs...")
-            print("This will take several hours depending on your hardware.")
             print()
             
             history = trainer.train(max_epochs)
@@ -88,7 +84,7 @@ class ExperimentRunner:
             print()
             
             epochs, *_ = analyzer.analyze_chaos_dynamics(
-                start_epoch=config.START_EPOCH, 
+                start_epoch= 1, 
                 end_epoch=max_analysis_epochs, 
                 interval=1
             )
@@ -107,24 +103,32 @@ class ExperimentRunner:
             return False
     
     def run_visualization(self):
-        """Generate all visualization plots"""
-        
         print("STEP 3: GENERATING VISUALIZATIONS")
         print("-" * 40)
-        
-        try:
-            visualizer = ResultsVisualizer(seed_manager=self.seed_manager)
-            visualizer.generate_all_plots()
-            
-            print("✓ All visualizations generated successfully!")
-            print(f"✓ Plots saved to {os.path.join(config.RESULTS_PATH, 'figures')}")
-            print()
-            
-            return True
-            
-        except Exception as e:
-            print(f"✗ Visualization failed: {str(e)}")
+
+        visualizer = ResultsVisualizer(seed_manager=self.seed_manager)
+        if not visualizer.load_results():
+            print("✗ Cannot load results. Please run analysis first.")
             return False
+
+        figures_dir = os.path.join(config.RESULTS_PATH, 'figures')
+        os.makedirs(figures_dir, exist_ok=True)
+
+        training_curves_path = os.path.join(figures_dir, 'training_curves.png')
+        test_loss_ftle_path = os.path.join(figures_dir, 'test_loss_with_ftle.png')
+        combined_anim_gpu_path = os.path.join(figures_dir, 'combined_bifurcation_animation_gpu.mov')
+
+        visualizer.plot_training_curves(save_path=training_curves_path)
+        visualizer.plot_test_loss_with_ftle(save_path=test_loss_ftle_path)
+        visualizer.plot_test_loss_bifurcation_animation_gpu(
+            video_path=combined_anim_gpu_path,
+            subsample_epochs=1,
+            subsample_samples=config.NUM_TEST_SAMPLES,
+        )
+
+        print(f"✓ Visualizations completed. Files saved to {figures_dir}")
+        print()
+        return True
     
     def print_summary(self):
         """Print experiment summary"""
@@ -145,7 +149,7 @@ class ExperimentRunner:
         files_to_check = [
             ('training_history.json', 'Training completed'),
             ('chaos_analysis_results.h5', 'Chaos analysis completed'),
-            ('figures/training_curves.png', 'Visualizations generated')
+            ('figures/test_loss_with_ftle.png', 'Visualizations generated')
         ]
         
         for filename, description in files_to_check:

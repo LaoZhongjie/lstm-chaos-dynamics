@@ -56,28 +56,24 @@ class LSTMTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         state_dict = checkpoint['model_state_dict']
         
-        # Extract embedding weights
-        embedding_weights = state_dict['embedding.weight'].cpu().numpy()
-        
-        # Extract fc weights
-        fc_weight = state_dict['fc.weight'].cpu().numpy()
-        fc_bias = state_dict['fc.bias'].cpu().numpy()
-        fc_weights = (fc_weight, fc_bias)
-        
-        print(f"Extracted embedding weights: shape {embedding_weights.shape}")
-        print(f"Extracted fc weights: weight shape {fc_weight.shape}, bias shape {fc_bias.shape}")
-        
-        return embedding_weights, fc_weights
-
-    def initialize_model(self, vocab_size, pretrained_checkpoint=None):
         embedding_weights = None
         fc_weights = None
         
-        # Priority 1: Load from specified checkpoint
-        if pretrained_checkpoint is not None:
-            embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
-            if embedding_weights is not None:
-                print("Using embedding and fc weights from checkpoint")
+        if config.EMBEDDING_FIX:
+            embedding_weights = state_dict['embedding.weight'].cpu().numpy()
+            print(f"Extracted embedding weights: shape {embedding_weights.shape}")
+            
+        if config.FC_FIX:
+            fc_weight = state_dict['fc.weight'].cpu().numpy()
+            fc_bias = state_dict['fc.bias'].cpu().numpy()
+            fc_weights = (fc_weight, fc_bias)
+            print(f"Extracted fc weights: weight shape {fc_weight.shape}, bias shape {fc_bias.shape}")
+        
+        return embedding_weights, fc_weights
+
+    def initialize_model(self, vocab_size, pretrained_checkpoint=config.PRETRAINED_CHECKPOINT):
+        
+        embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
         
         self.model = LSTM(
             vocab_size=vocab_size,
@@ -247,21 +243,3 @@ class LSTMTrainer:
             self.data_loader.create_data_loaders(X_train, X_test, y_train, y_test)
         
         return self.data_loader.vocab_size
-
-def main():
-    """Main training function"""
-    seed_manager = HierarchicalSeedManager(config.RANDOM_SEED)
-    seed_manager.apply_global_seed()
-    
-    trainer = LSTMTrainer(seed_manager=seed_manager)
-    
-    vocab_size = trainer.load_data()
-    trainer.initialize_model(vocab_size)
-    
-    history = trainer.train()
-    
-    print(f"Training results saved to {config.RESULTS_PATH}")
-    print(f"Model checkpoints saved to {config.CHECKPOINT_PATH}")
-
-if __name__ == "__main__":
-    main()

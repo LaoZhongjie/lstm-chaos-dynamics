@@ -16,11 +16,10 @@ class LSTM(nn.Module):
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         if embedding_weights is not None:
-            print("\nEmbedding Layer: Loaded Pretrained, Fix ")
+            print("\n[lstm]Embedding Layer: loaded, not trainable... ")
             self.embedding.weight = nn.Parameter(torch.tensor(embedding_weights, dtype=torch.float32), requires_grad=False)
         else:
-            # Fallback to uniform initialization if no pre-trained weights provided
-            print("\nEmbedding Layer: Uniform ")
+            print("\n[lstm]Embedding Layer: uniform init")
             with self.seed_manager.local_seed("model.init.embedding"):
                 nn.init.uniform_(self.embedding.weight, -0.1, 0.1)
             self.embedding.weight.data[0].fill_(0)  # Padding token
@@ -33,20 +32,19 @@ class LSTM(nn.Module):
         )
         
         self.fc = nn.Linear(hidden_size, num_classes)
-        
         if fc_weights is not None:
-            print("FC Layer: Loaded Pretrained, Fix\n")
+            print("[lstm]FC Layer: loaded, not trainable...\n")
             self.fc.weight = nn.Parameter(torch.tensor(fc_weights[0], dtype=torch.float32), requires_grad=False)
             self.fc.bias = nn.Parameter(torch.tensor(fc_weights[1], dtype=torch.float32), requires_grad=False)
         else:
-            print("FC Layer: Xavier Uniform/Zeros\n")
+            print("[lstm]FC Layer: micro normal init...\n")
             with self.seed_manager.local_seed("model.init.fc"):
-                nn.init.xavier_uniform_(self.fc.weight)
+                nn.init.normal_(self.fc.weight, mean=0.0, std=1e-2)
             nn.init.zeros_(self.fc.bias)
 
-        self._init_weights()
+        self._init_recurrent_weights()
         
-    def _init_weights(self):
+    def _init_recurrent_wweights(self):
         for name, param in self.lstm.named_parameters():
             if 'weight_hh' in name:
                 hidden_size = param.shape[1]
@@ -64,54 +62,22 @@ class LSTM(nn.Module):
                 param.data.zero_()
                 n = param.size(0)
                 # forget gate bias
-                param.data[n//4:n//2].fill_(1.0)
-
-        # nn.init.normal_(self.fc.weight, mean=0.0, std=1e-2)
-        # nn.init.xavier_uniform_(self.fc.weight)
-        # nn.init.zeros_(self.fc.bias)
-    
-    # def _init_weights(self):
-    #     for name, param in self.lstm.named_parameters():
-
-    #         # recurrent weights (hidden -> hidden)
-    #         if 'weight_hh' in name:
-    #             hidden_size = param.shape[1]
-    #             for i in range(4):
-    #                 nn.init.orthogonal_(param.data[i*hidden_size:(i+1)*hidden_size])
-
-    #         # input weights (input -> hidden)
-    #         elif 'weight_ih' in name:
-    #             nn.init.xavier_uniform_(param)
-
-    #         # biases
-    #         elif 'bias' in name:
-    #             param.data.zero_()
-    #             n = param.size(0)
-
-    #             # forget gate bias
-    #             param.data[n//4:n//2].fill_(1.0)
-
-    #     # output layer
-    #     nn.init.xavier_uniform_(self.fc.weight)
-    #     nn.init.zeros_(self.fc.bias)
+                param.data[n//4:n//2].fill_(-1.0)
     
     def forward(self, x, lengths, hidden=None):
         batch_size = x.size(0)
         
-        # Embedding layer
         embedded = self.embedding(x)
         
-        # lstm layer
         if hidden is None:
             hidden = self.init_hidden(batch_size)
         
         lstm_out, hidden = self.lstm(embedded, hidden)
         
-        # Use last output for classification
+        # Use last true output for classification
         idx = (lengths - 1).clamp(min=0)
         last_output = lstm_out[torch.arange(batch_size, device=x.device), idx, :]
         
-        # Fully connected layer
         output = self.fc(last_output)
         
         return output, hidden

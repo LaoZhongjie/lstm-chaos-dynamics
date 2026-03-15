@@ -1,6 +1,6 @@
 import os
-import json
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 import warnings
@@ -15,6 +15,7 @@ from seed_utils import HierarchicalSeedManager
 class ResultsVisualizer:
     def __init__(self, seed_manager=None) -> None:
         self.results: Optional[Dict[str, Any]] = None
+        self.h5_path: Optional[str] = None
         self.seed_manager = seed_manager or HierarchicalSeedManager(config.RANDOM_SEED)
         self.bifurcation_rng = self.seed_manager.numpy_rng("visualization.bifurcation.subsample")
         self.perturbation_rng = self.seed_manager.numpy_rng("visualization.perturbation.subsample")
@@ -28,7 +29,7 @@ class ResultsVisualizer:
             'axes.titlesize': 20,
             'xtick.labelsize': 11,
             'ytick.labelsize': 11,
-            'legend.fontsize': 10,
+            'legend.fontsize': 12,
             'figure.titlesize': 20,
             'lines.linewidth': 2,
             'axes.linewidth': 1.5,
@@ -38,55 +39,54 @@ class ResultsVisualizer:
     
     def load_results(self):
         h5_path = os.path.join(config.RESULTS_PATH, 'chaos_analysis_results.h5')
-        summary_path = os.path.join(config.RESULTS_PATH, 'analysis_summary.json')
-        history_path = os.path.join(config.RESULTS_PATH, 'training_history.json')
+        self.h5_path = h5_path
 
-        print(f"Loading results from h5 file from: {h5_path}")
-        if os.path.exists(h5_path):
-            try:
-                with h5py.File(h5_path, 'r') as f:
-                    self.results = {}
-                    keep_as_array = {
-                        'analyzed_epochs', 'mean_final_perturbed_distances', 'bifurcation_data', 
-                        'perturbed_distances'
-                    }
-                    for key in f.keys():
-                        if key in keep_as_array:
-                            self.results[key] = f[key][:]  # 保持为 numpy array
-                        else:
-                            self.results[key] = f[key][:].tolist()  # 其他转成 list
-                print(f"Loaded results from h5 file for {len(self.results['epochs'])} epochs")
-                return True
-            except Exception as e:
-                print(f"Could not load h5: {e}")
-        
-        # Try summary
-        if os.path.exists(summary_path):
-            try:
-                with open(summary_path, 'r') as f:
-                    data = json.load(f)
-                self.results = data.get('training_curves', {})
-                print(f"Loaded results from summary file")
-                return True
-            except Exception as e:
-                print(f"Could not load summary: {e}")
-        
-        # Fallback to training history
-        if os.path.exists(history_path):
-            try:
-                with open(history_path, 'r') as f:
-                    self.results = json.load(f)
-                print(f"Loaded training history as fallback")
-                return True
-            except Exception as e:
-                print(f"Could not load history: {e}")
-        
-        return False
+        allowed_h5_keys = {
+            'epochs',
+            'train_loss',
+            'test_loss',
+            'train_accuracy',
+            'test_accuracy',
+            'grad_norms',
+            'analyzed_epochs',
+            'bifurcation_data',
+            'sample_indices',
+            'ftle_mean',
+            'ftle_per_sample',
+        }
+        def _load_h5(path):
+            if not os.path.exists(path):
+                return None
+
+            with h5py.File(path, 'r') as f:
+                data = {}
+                for key in f.keys():
+                    if key not in allowed_h5_keys:
+                        continue
+                    ds = f[key]
+                    if key == 'bifurcation_data':
+                        # Defer heavy bifurcation_data loading to animation methods.
+                        data['bifurcation_data_shape'] = tuple(ds.shape)
+                        continue
+                    data[key] = ds[:].tolist()
+            return data
+
+        try:
+            data = _load_h5(h5_path)
+        except Exception as e:
+            print(f"[load_results] Failed to load h5: {e}", flush=True)
+            return False
+
+        if data is None:
+            print(f"[load_results] H5 file not found: {h5_path}", flush=True)
+            return False
+
+        self.results = data
+        print("[load_results] Loaded h5 data.", flush=True)
+        return True
     
     def plot_training_curves(self, save_path=None):
-        if not self.results:
-            print("No results loaded")
-            return
+        print("Generating training_curves plot...")
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
         
@@ -95,10 +95,6 @@ class ResultsVisualizer:
         test_accuracy = self.results.get('test_accuracy', [])
         train_loss = self.results.get('train_loss', [])
         train_accuracy = self.results.get('train_accuracy', [])
-        
-        if not epochs or not test_loss:
-            print("No training data available")
-            return
         
         # Plot 1: Loss curves
         ax1.plot(epochs, train_loss, color='blue', linewidth=1, label='Train Loss', alpha=0.7)
@@ -137,11 +133,12 @@ class ResultsVisualizer:
         
         if save_path:
             plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches='tight')
-            print(f"Saved plot to {save_path}")
+            print(f"✓ training_curves saved to {save_path}")
         
         plt.show()
     
     def plot_test_loss_with_ftle(self, *, save_path: Optional[str] = None) -> None:
+        print("Generating test_loss_with_ftle plot...")
         epochs = np.asarray(self.results.get("epochs", []))
         test_loss = np.asarray(self.results.get("test_loss", []), dtype=np.float32)
         analyzed_epochs = np.asarray(self.results.get("analyzed_epochs", []))
@@ -170,7 +167,7 @@ class ResultsVisualizer:
         ax2.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
         ax2.set_ylabel("FTLE", color=ftle_color, fontsize=16)
         ax2.tick_params(axis="y", labelcolor=ftle_color)
-        
+
         ymin, ymax = ax2.get_ylim()
         ax2.set_ylim(ymin, ymax)
         ax2.axhspan(0, ymax, alpha=0.05, color="red")   # FTLE > 0
@@ -186,310 +183,263 @@ class ResultsVisualizer:
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches="tight")
-            print(f"Saved plot to {save_path}")
+            print(f"✓ test_loss_with_ftle saved to {save_path}")
 
         plt.show()
-        
-    def plot_mean_final_pt_dists_bifurcation_diagram_with_animation(self, video_path=None,
-                                                                subsample_epochs=1,
-                                                                subsample_samples=100):
-        # ==== 1. 准备数据 ====
-        if not self.results or 'bifurcation_data' not in self.results:
-            print("No bifurcation data available.")
-            return
 
-        epochs = self.results['epochs']
-        test_loss = self.results['test_loss']
-        analyzed_epochs = self.results['analyzed_epochs']
-        mean_final_perturbed_distances = self.results['mean_final_perturbed_distances']
-        bifurcation_data = self.results['bifurcation_data']
+    def plot_test_loss_bifurcation_animation_gpu(
+        self,
+        video_path: str,
+        subsample_epochs: int = 1,
+        subsample_samples: int = 100,
+        fps: int = 20,
+        dpi: int = 100,
+        device: Optional[str] = None,
+        point_alpha: float = 0.5,
+        point_color: tuple = (31, 119, 180),
+        codec: Optional[str] = None,
+        frame_step: int = 2,
+    ) -> None:
+        print("Generating test-loss vs bifurcation GPU animation...", flush=True)
+        if not self.results:
+            raise ValueError("No bifurcation data available.")
+        if not video_path:
+            raise ValueError("video_path must be provided.")
 
-        # ==== 2. 创建画布和静态元素 ====
-        fig, ax = plt.subplots(figsize=(16, 8))
+        print("[gpu_anim] Loading rendering dependencies...", flush=True)
+        try:
+            import cv2
+        except ImportError as exc:
+            raise ImportError("opencv-python is required for GPU animation rendering.") from exc
 
-        # 测试损失
+        try:
+            import imageio.v2 as imageio
+        except ImportError as exc:
+            raise ImportError("imageio is required for video writing.") from exc
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_device = torch.device(device)
+
+        if codec is None:
+            codec = "h264_videotoolbox" if os.uname().sysname == "Darwin" else "libx264"
+
+        print("[gpu_anim] Preparing metadata and selected epochs...", flush=True)
+        epochs = np.asarray(self.results['epochs'])
+        test_loss = np.asarray(self.results['test_loss'], dtype=np.float32)
+        analyzed_epochs = np.asarray(self.results['analyzed_epochs'])
+
+        bifurcation_data = self.results.get('bifurcation_data', None)
+        use_h5 = bifurcation_data is None and self.h5_path and os.path.exists(self.h5_path)
+        if not use_h5 and bifurcation_data is None:
+            raise ValueError("No bifurcation data available.")
+
+        if use_h5:
+            print(f"[gpu_anim] Opening H5 dataset: {self.h5_path}", flush=True)
+            with h5py.File(self.h5_path, 'r') as h5_file:
+                h5_ds = h5_file['bifurcation_data']
+                shape = tuple(int(v) for v in h5_ds.shape)
+                est_gib = (np.prod(shape) * h5_ds.dtype.itemsize) / (1024 ** 3)
+                print(
+                    f"[gpu_anim] Loading full bifurcation_data to RAM. shape={shape}, dtype={h5_ds.dtype}, est={est_gib:.2f} GiB",
+                    flush=True,
+                )
+                bifurcation_data = h5_ds[:]
+        else:
+            print("[gpu_anim] Using bifurcation data from memory.", flush=True)
+            bifurcation_data = np.asarray(bifurcation_data)
+
+        bifurcation_data = np.asarray(bifurcation_data)
+        if bifurcation_data.ndim != 3:
+            raise ValueError(f"bifurcation_data must be 3D [epochs, samples, timesteps], got {bifurcation_data.shape}")
+        if not bifurcation_data.flags["C_CONTIGUOUS"]:
+            bifurcation_data = np.ascontiguousarray(bifurcation_data)
+
+        n_available_samples = int(bifurcation_data.shape[1])
+        n_timesteps = int(bifurcation_data.shape[2])
+
+        data_on_gpu = False
+        bifurcation_tensor = None
+        if torch_device.type == "cuda":
+            try:
+                print("[gpu_anim] Transferring full bifurcation_data to GPU VRAM...", flush=True)
+                bifurcation_tensor = torch.from_numpy(bifurcation_data).to(torch_device)
+                data_on_gpu = True
+                print("[gpu_anim] Full tensor is now resident on GPU.", flush=True)
+            except RuntimeError as exc:
+                print(f"[gpu_anim] GPU preload failed, fallback to CPU-resident data: {exc}", flush=True)
+
+        epoch_indices = np.arange(0, analyzed_epochs.size, max(1, int(subsample_epochs)))
+
+        selected_sample_count = min(int(subsample_samples), n_available_samples)
+
+        selected_epochs = analyzed_epochs[epoch_indices]
+        sample_indices = np.sort(self.bifurcation_rng.choice(
+            n_available_samples,
+            size=selected_sample_count,
+            replace=False,
+        ))
+        frame_step = max(1, int(frame_step))
+        frame_indices = np.arange(0, n_timesteps, frame_step, dtype=np.int32)
+        print(
+            f"[gpu_anim] Data ready: epochs={len(selected_epochs)}, samples={selected_sample_count}, timesteps={n_timesteps}, rendered_frames={len(frame_indices)}, frame_step={frame_step}",
+            flush=True,
+        )
+
+        use_full_epochs = (
+            len(epoch_indices) == bifurcation_data.shape[0]
+            and int(epoch_indices[0]) == 0
+            and np.all(np.diff(epoch_indices) == 1)
+        )
+        use_full_samples = (
+            len(sample_indices) == n_available_samples
+            and int(sample_indices[0]) == 0
+            and np.all(np.diff(sample_indices) == 1)
+        )
+        epoch_indices_t = torch.from_numpy(epoch_indices.astype(np.int64)).to(torch_device) if data_on_gpu else None
+        sample_indices_t = torch.from_numpy(sample_indices.astype(np.int64)).to(torch_device) if data_on_gpu else None
+
+        def _frame_vals(frame: int) -> torch.Tensor:
+            if data_on_gpu:
+                frame_slice = bifurcation_tensor[:, :, int(frame)]
+                if not use_full_epochs:
+                    frame_slice = frame_slice.index_select(0, epoch_indices_t)
+                if not use_full_samples:
+                    frame_slice = frame_slice.index_select(1, sample_indices_t)
+                return frame_slice.reshape(-1)
+
+            vals_np = bifurcation_data[np.ix_(epoch_indices, sample_indices, [frame])][:, :, 0].reshape(-1)
+            return torch.from_numpy(vals_np).to(torch_device, non_blocking=(torch_device.type == "cuda"))
+
+        print("[gpu_anim] Building base figure...", flush=True)
+        fig, ax = plt.subplots(figsize=(16, 8), dpi=dpi)
         ax.plot(epochs, test_loss, color='brown', linewidth=1, label='Test Loss')
         ax.set_ylabel('Test Loss', color='brown', fontsize=16)
         ax.tick_params(axis='y', labelcolor='brown')
 
-        # 全局最优
-        min_loss_idx = np.argmin(test_loss)
+        min_loss_idx = int(np.argmin(test_loss))
         global_opt_epoch = epochs[min_loss_idx]
-        ax.axvline(x=global_opt_epoch, color='r', linestyle='--',
-                label=f"Global Optimum (Epoch {global_opt_epoch})")
+        ax.axvline(x=global_opt_epoch, color='r', linestyle='--', label=f"Global Optimum (Epoch {global_opt_epoch})")
 
-        # 第二轴
         ax_twin = ax.twinx()
-        ax_twin.set_ylabel('Mean Final Perturbed Distance / Reduced Sum Bifurcation', color='green', fontsize=16) 
-        ax_twin.tick_params(axis='y', labelcolor='green')  # 第二轴刻度颜色
-        
-        # 渐进距离
-        valid_mask = np.isfinite(mean_final_perturbed_distances)
-        
-        if np.any(valid_mask):
-            ax_twin.plot(analyzed_epochs[valid_mask], mean_final_perturbed_distances[valid_mask],
-                        color='green', linewidth=1, label='Mean Final Perturbed Distance')
+        ax_twin.set_ylabel('Reduced Sum Bifurcation', color='green', fontsize=16)
+        ax_twin.tick_params(axis='y', labelcolor='green')
 
-        # ==== 3. 分岔数据降采样 ====
-        epoch_indices = np.arange(0, analyzed_epochs.size, subsample_epochs)
-        selected_epochs = analyzed_epochs[epoch_indices]
-        selected_bifurcation = bifurcation_data[epoch_indices, :, :]
-
-        sample_indices = self.bifurcation_rng.choice(
-            selected_bifurcation.shape[1],
-            size=min(subsample_samples, selected_bifurcation.shape[1]),
-            replace=False,
-        )
-        selected_bifurcation = selected_bifurcation[:, sample_indices, :]
-
-        n_timesteps = selected_bifurcation.shape[2]
-
-        # ==== 4. 设置坐标轴范围 ====
-        # 展平
-        a_flat = mean_final_perturbed_distances.reshape(-1)
-        b_flat = bifurcation_data.reshape(-1)
-
-        # 合并并去掉 NaN/Inf
-        all_vals = np.concatenate([a_flat, b_flat])
-        finite_vals = all_vals[np.isfinite(all_vals)]
-        y_min, y_max = np.min(finite_vals), np.max(finite_vals)
-        ax_twin.set_ylim(y_min, y_max)
-        ax.set_xlim(selected_epochs.min(), selected_epochs.max())
-
-        # ==== 5. 添加标题、网格、图例（在动画前完成） ====
+        print("[gpu_anim] Probing value range for y-axis scaling...", flush=True)
+        probe_count = 64
+        probe_frames = np.linspace(0, n_timesteps - 1, min(probe_count, n_timesteps), dtype=int)
+        bif_min = np.inf
+        bif_max = -np.inf
+        for frame in probe_frames:
+            vals_t = _frame_vals(int(frame))
+            finite_mask = torch.isfinite(vals_t)
+            if not torch.any(finite_mask):
+                continue
+            finite_vals = vals_t[finite_mask]
+            bif_min = min(bif_min, float(torch.min(finite_vals).item()))
+            bif_max = max(bif_max, float(torch.max(finite_vals).item()))
+        if not np.isfinite(bif_min) or not np.isfinite(bif_max):
+            bif_min, bif_max = -1.0, 1.0
+        ax_twin.set_ylim(bif_min, bif_max)
+        ax.set_xlim(float(np.min(selected_epochs)), float(np.max(selected_epochs)))
         ax.set_xlabel('Epochs', fontsize=16)
-        ax.set_title('Test Loss + Mean Final Perturbed Distance + Bifurcation Map', fontsize=20)
+        ax.set_title('Test Loss + Bifurcation Map', fontsize=20)
         ax.grid(True, alpha=0.3)
 
+        ax_twin.scatter([], [], s=0.3, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax_twin.get_legend_handles_labels()
-        ax.legend(
-            lines1 + lines2,          # 所有曲线对象
-            labels1 + labels2,        # 对应标签
-            loc='lower right',        # 固定在右上角
-            framealpha=0.5            # 图例背景透明度 0~1
-        )
+        ax.legend(lines1 + lines2, labels1 + labels2, loc='lower right', framealpha=0.5)
 
-        # ==== 6. 初始化散点和文本 ====
-        scatter = ax_twin.scatter([], [], s=0.3, alpha=0.5, color='#1f77b4', label='Bifurcation Map')
-        timestep_text = ax.text(0.02, 0.98, '', transform=ax.transAxes,
-                                fontsize=16, verticalalignment='top',
-                                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
-
-        # ==== 7. 动画函数 ====
-        def init():
-            scatter.set_offsets(np.empty((0, 2)))
-            timestep_text.set_text('')
-            return [scatter, timestep_text]
-
-        def animate(frame):
-            vals = selected_bifurcation[:, :, frame].flatten()
-            xs = np.repeat(selected_epochs, selected_bifurcation.shape[1])
-            scatter.set_offsets(np.column_stack((xs, vals)))
-            timestep_text.set_text(f'Timestep: {frame}')
-            return [scatter, timestep_text]
-
-        # ==== 8. 创建动画 ====
-        print("DEBUG selected_bifurcation shape:", selected_bifurcation.shape)
-        print("DEBUG n_timesteps:", n_timesteps)
-
-        pbar = tqdm(total=n_timesteps, desc="Generating frames")
-
-        def animate_with_pbar(frame):
-            out = animate(frame)   # 调用你原来的 animate
-            pbar.update(1)
-            return out
-
-        frames = list(range(n_timesteps))
-        anim = FuncAnimation(
-            fig, animate_with_pbar, init_func=init,
-            frames=frames, interval=50,
-            blit=True, repeat=False
-        )
-
-        # ==== 9. 保存视频 ====
-        if video_path:
-            writer = FFMpegWriter(fps=20)
-            anim.save(video_path, writer=writer, dpi=100)
-            print(f"Animation saved to {video_path}")
-
+        print("[gpu_anim] Precomputing canvas and pixel mapping...", flush=True)
         plt.tight_layout()
-        plt.show()
-    
-    def create_perturbed_distance_animation(self, save_path=None, subsample_epochs=10, subsample_samples=50):
-        """
-        Create scatter plot animation showing perturbation distances across epochs for each timestep
-        
-        Args:
-            save_path: Path to save the animation (mov format)
-            subsample_epochs: Sample every N epochs to reduce animation length
-            subsample_samples: Sample N samples to reduce scatter plot density
-        """
-        if not self.results or 'perturbed_distances' not in self.results:
-            print("No perturbed_distances data available. Please ensure 'perturbed_distances' is saved in results.")
-            return
-        
-        
-        perturbed_distances = np.array(self.results['perturbed_distances'])  # Shape: (n_epochs, n_samples, n_timesteps)
-        analyzed_epochs = self.results.get('analyzed_epochs', list(range(1, perturbed_distances.shape[0] + 1)))
-        
-        # Subsample epochs and samples
-        epoch_indices = list(range(0, len(analyzed_epochs), subsample_epochs))
-        selected_epochs = [analyzed_epochs[i] for i in epoch_indices]
-        selected_perturbed_distances = perturbed_distances[epoch_indices, :, :]
-        
-        sample_indices = self.perturbation_rng.choice(
-            perturbed_distances.shape[1],
-            size=min(subsample_samples, perturbed_distances.shape[1]),
-            replace=False,
-        )
-        selected_perturbed_distances = selected_perturbed_distances[:, sample_indices, :]
-        
-        n_timesteps = selected_perturbed_distances.shape[2]
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(16, 8))
-        
-        # Set axis limits
-        vmin = selected_perturbed_distances.min()
-        vmax = selected_perturbed_distances.max()
+        fig.canvas.draw()
 
-        ax.set_xlim(min(selected_epochs), max(selected_epochs))
-        ax.set_ylim(vmin, vmax)
-        
-        ax.set_xlabel('Epoch', fontsize=16)
-        ax.set_ylabel('Log Perturbation Distance', fontsize=16)
-        ax.set_title('Perturbation Distance Evolution', fontsize=20)
-        ax.grid(True, alpha=0.3)
-        
-        # 初始化绘图元素
-        scatter = ax.scatter([], [], s=0.5, alpha=0.5, color='green', label='Individual Samples')  # 散点：单个样本
-        mean_line, = ax.plot([], [], color='red', linewidth=1, label='Sample Mean') 
-        timestep_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, 
-                            fontsize=16, verticalalignment='top')
-        ax.legend(loc='upper right') 
-        
-        def init():
-            """Initialize animation"""
-            scatter.set_offsets(np.empty((0, 2)))
-            mean_line.set_data([], [])
-            timestep_text.set_text('')
-            return [scatter, timestep_text]
-        
-        def animate(frame):
-            """Update animation for each frame"""
-            timestep = frame
-            
-            # Get data for current timestep
-            epoch_data = np.array(selected_epochs)
-            distance_data = selected_perturbed_distances[:, :, timestep].flatten()
-            
-            # Update scatter plot
-            scatter.set_offsets(np.column_stack((epoch_data.repeat(len(sample_indices)), 
-                                              distance_data)))
-            
-            # 对每个epoch，计算该epoch下所有样本在当前时间步的均值（axis=1：按样本维度求平均）
-            sample_mean_per_epoch = np.nanmean(selected_perturbed_distances[:, :, timestep], axis=1)
-            mean_line.set_data(selected_epochs, sample_mean_per_epoch)
-        
-            # Update timestep text
-            timestep_text.set_text(f'Timestep: {timestep}')
-            
-            return [scatter, timestep_text]
-        
-        # ==== 8. 创建动画 ====
+        background_rgba = np.asarray(fig.canvas.buffer_rgba()).copy()
+        height, width = background_rgba.shape[:2]
 
-        pbar = tqdm(total=n_timesteps, desc="Generating frames")
+        x0_data = float(np.min(selected_epochs))
+        x1_data = float(np.max(selected_epochs))
+        y0_data, y1_data = ax_twin.get_ylim()
+        px0, py0 = ax_twin.transData.transform((x0_data, y0_data))
+        px1, py1 = ax_twin.transData.transform((x1_data, y1_data))
 
-        def animate_with_pbar(frame):
-            out = animate(frame)   # 调用你原来的 animate
-            pbar.update(1)
-            return out
+        x_slope = (px1 - px0) / (x1_data - x0_data + 1e-12)
+        x_bias = px0 - x_slope * x0_data
+        y_slope = (py1 - py0) / (y1_data - y0_data + 1e-12)
+        y_bias = py0 - y_slope * y0_data
 
-        frames = list(range(n_timesteps))
-        anim = FuncAnimation(
-            fig, animate_with_pbar, init_func=init,
-            frames=frames, interval=2,
-            blit=True, repeat=False
-        )
-    
-        # Save animation
-        if save_path:
-            writer = FFMpegWriter(fps=30)
-            anim.save(save_path, writer=writer, dpi=100)
-            print(f"Animation saved to {save_path}")
-        
-        plt.show()
-        
-        return anim
-    
+        x_data = np.repeat(selected_epochs, selected_sample_count).astype(np.float32)
+        x_pix = torch.from_numpy(np.rint(x_data * x_slope + x_bias).astype(np.int64)).to(torch_device)
+        x_pix = torch.clamp(x_pix, 0, width - 1)
 
-    def generate_all_plots(self):
-        """Generate all plots"""
-        
-        if not self.load_results():
-            print("Cannot load results. Please run analysis first.")
-            return
-        
-        figures_dir = os.path.join(config.RESULTS_PATH, 'figures')
-        os.makedirs(figures_dir, exist_ok=True)
-        
-        # Generate plots
-        print("Generating plots...")
-        plot_name = 'training_curves'
+        point_color_np = np.asarray(point_color, dtype=np.float32).reshape(1, 3)
+        one_minus_alpha = float(max(0.0, min(1.0, 1.0 - point_alpha)))
+
         try:
-            save_path = os.path.join(figures_dir, f"{plot_name}.png") if config.SAVE_FIGURES else None
-            self.plot_training_curves(save_path=save_path)
-            print(f"✓ Generated {plot_name} plot")
-        except Exception as e:
-            print(f"✗ Failed to generate {plot_name} plot: {str(e)}")
+            print(f"[gpu_anim] Initializing video writer with codec='{codec}'...", flush=True)
+            writer = imageio.get_writer(
+                video_path,
+                fps=fps,
+                codec=codec,
+                format='FFMPEG',
+                pixelformat='yuv420p',
+            )
+        except Exception:
+            print("[gpu_anim] Requested codec unavailable, fallback to 'libx264'.", flush=True)
+            writer = imageio.get_writer(
+                video_path,
+                fps=fps,
+                codec='libx264',
+                format='FFMPEG',
+                pixelformat='yuv420p',
+            )
 
-        plot_name = "test_loss_with_ftle"
-        if self.results and all(
-            key in self.results for key in ["epochs", "test_loss", "analyzed_epochs", "ftle_mean"]
-        ):
-            try:
-                save_path = os.path.join(figures_dir, f"{plot_name}.png") if config.SAVE_FIGURES else None
-                self.plot_test_loss_with_ftle(save_path=save_path)
-                print(f"✓ Generated {plot_name} plot")
-            except Exception as e:
-                print(f"✗ Failed to generate {plot_name} plot: {str(e)}")
-        
-        # Generate combined animation: Test Loss + Mean Final Perturbed Distance + Bifurcation Map
-        if self.results and all(key in self.results for key in ['bifurcation_data', 'mean_final_perturbed_distances', 'test_loss']):
-            print("\nGenerating combined animation (Test Loss + Mean Final Perturbed Distance + Bifurcation Map)...")
-            try:
-                # 1. 定义视频保存路径（仅当需要保存时生成路径）
-                combined_anim_path = os.path.join(figures_dir, 'combined_bifurcation_animation.mov') if config.SAVE_FIGURES else None
+        print("[gpu_anim] Starting frame generation...", flush=True)
+        try:
+            for frame in tqdm(frame_indices, desc="Generating GPU frames"):
+                vals_t = _frame_vals(int(frame))
+
+                y_disp = vals_t * y_slope + y_bias
+                y_pix = torch.round((height - 1) - y_disp).to(torch.int64)
+
+                valid = (y_pix >= 0) & (y_pix < height)
+                if torch.any(valid):
+                    xv = x_pix[valid]
+                    yv = y_pix[valid]
+                    flat_idx = yv * width + xv
+                    counts = torch.bincount(flat_idx, minlength=height * width)
+                    nz = torch.nonzero(counts, as_tuple=False).squeeze(1)
+
+                    frame_rgb = background_rgba[:, :, :3].copy()
+                    if nz.numel() > 0:
+                        alpha_eff = 1.0 - torch.pow(one_minus_alpha, counts[nz].to(torch.float32))
+                        alpha_eff = torch.clamp(alpha_eff, 0.0, 1.0)
+
+                        ys = (nz // width).cpu().numpy()
+                        xs = (nz % width).cpu().numpy()
+                        a = alpha_eff.cpu().numpy().reshape(-1, 1)
+
+                        base = frame_rgb[ys, xs, :].astype(np.float32)
+                        blended = (1.0 - a) * base + a * point_color_np
+                        frame_rgb[ys, xs, :] = blended.astype(np.uint8)
+                else:
+                    frame_rgb = background_rgba[:, :, :3].copy()
+
+                label = f"Timestep: {int(frame)}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.75
+                text_thickness = 1
                 
-                # 2. 调用动画函数（核心：只传 video_path，不传 save_path，避免生成静态图）
-                self.plot_mean_final_pt_dists_bifurcation_diagram_with_animation(
-                    video_path=combined_anim_path,  # 只保存视频，不保存静态图
-                    subsample_epochs=1,             # 按需求调整：每隔1个epoch取1个（不丢数据）
-                    subsample_samples=config.NUM_TEST_SAMPLES      # 按需求调整
+                cv2.putText(
+                    frame_rgb, label, (24, 36),
+                    font, font_scale, (0, 0, 0), text_thickness, cv2.LINE_AA,
                 )
-                
-                print("✓ Generated combined animation (Test Loss + Mean Final Perturbed Distance + Bifurcation Map)")
-            except Exception as e:
-                print(f"✗ Error generating combined animation: {str(e)}")
+                writer.append_data(frame_rgb)
+        finally:
+            writer.close()
+            plt.close(fig)
 
-        print(f"\nAnimations saved to {figures_dir}")
-
-        # Generate animations if perturbed_distance data is available
-        if self.results and 'perturbed_distances' in self.results:
-            print("\nGenerating perturbed_distance animations...")
-            
-            try:
-                anim_path = os.path.join(figures_dir, 'perturbed_distance_animation.mov') if config.SAVE_FIGURES else None
-                self.create_perturbed_distance_animation(
-                    save_path=anim_path, 
-                    subsample_epochs=1, 
-                    subsample_samples=config.NUM_TEST_SAMPLES)
-                print("✓ Generated perturbed_distance animation")
-            except Exception as e:
-                print(f"✗ Error generating perturbed_distance animation: {str(e)}")
-        
-        print(f"\nPlots saved to {figures_dir}")
-
+        print(f"✓ GPU animation saved to {video_path}", flush=True)
 
 __all__ = ["ResultsVisualizer"]
