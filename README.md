@@ -1,210 +1,108 @@
-# RNN Chaos Analysis Experiment
+# Edge of Chaos in Deep Recurrent Networks (Ongoing Research)
 
-This repository implements chaos analysis for RNN models, calculating asymptotic distances to study training dynamics.
+This repository contains an ongoing research pipeline for studying whether the **generalization optimum** of deep recurrent networks emerges near the **critical dynamical regime** (the *edge of chaos*).
 
-## Overview
+## Research Goal
 
-This code analyzes the dynamical behavior of RNN models during training by:
-1. Training an RNN on a classification task
-2. Computing asymptotic distances at different training epochs
-3. Visualizing training curves and chaos metrics
+Primary question:
 
-**Note**: Pattern detection (multiple descents, order-chaos transitions) requires manual inspection of the generated plots.
+> Does the best generalization point in deep recurrent training align with a transition region between ordered and chaotic dynamics?
 
-## Repository Structure
+Current hypothesis:
 
+- The epoch with minimum test loss is likely to lie near a dynamical critical region, rather than deep inside purely ordered or strongly chaotic regimes.
+
+This project is **work in progress**. No final scientific claim is made yet.
+
+## Method Summary
+
+For each training epoch, we study both optimization behavior and hidden-state dynamics:
+
+1. Train an LSTM classifier on IMDB sentiment.
+2. Save epoch checkpoints.
+3. Analyze hidden-state dynamics on a fixed analysis subset:
+   - **FTLE (Benettin method)** as a local sensitivity indicator.
+   - **Bifurcation-style trajectory statistics** from perturbed hidden-state evolution.
+4. Compare:
+   - test loss minima / generalization behavior
+   - FTLE trends
+   - bifurcation-map transitions
+
+## Current Pipeline
+
+Main entrypoint:
+
+```bash
+python main.py
 ```
-├── config.py                 # Configuration and hyperparameters
-├── data_loader.py            # Data loading and preprocessing  
-├── model.py                  # RNN model definition
-├── chaos_analysis.py         # Asymptotic stability analysis
-├── train.py                  # Training script
-├── analyze_chaos.py          # Chaos analysis script
-├── visualize_results.py      # Visualization script
-├── run_experiment.py         # Complete pipeline
-└── README.md                # This file
+
+Useful flags:
+
+```bash
+# quick validation run
+python main.py -qt
+
+# custom training/analysis horizons
+python main.py -te 500 -ae 500
+
+# skip completed stages
+python main.py -st      # skip training
+python main.py -sa      # skip analysis
+python main.py -sv      # skip visualization
+```
+
+## Project Structure
+
+```text
+.
+├── main.py                  # End-to-end runner (train -> analyze -> visualize)
+├── config.py                # Global experiment configuration
+├── train.py                 # LSTM training pipeline
+├── model.py                 # LSTM model
+├── data_loader.py           # IMDB data loading/preprocessing
+├── analysis_runner.py       # Epoch-wise chaos analysis orchestrator
+├── asymptotic_analyzer.py   # Hidden-state perturbation / trajectory analysis
+├── ftle_analyzer.py         # Benettin FTLE estimator
+├── visualize_results.py     # Research plots and animation generation
+├── seed_utils.py            # Hierarchical seed manager for reproducibility
+└── README.md
 ```
 
 ## Dataset
 
-Uses the IMDB Large Movie Review Dataset (50,000 reviews):
-- **Hugging Face**: https://huggingface.co/datasets/stanfordnlp/imdb
-- Automatically downloaded via `datasets` library
+- IMDB Large Movie Review Dataset (binary sentiment)
+- Source: <https://huggingface.co/datasets/stanfordnlp/imdb>
 
-## Installation
+## Reproducibility
 
-```bash
-pip install -r requirements.txt
-```
+- Seed control is centralized via `HierarchicalSeedManager`.
+- Analysis uses a fixed sampled subset to reduce stochastic variance across epochs.
 
-Configure in `config.py`:
-- Set `DEVICE = 'cuda'` if GPU available
-- Adjust `MAX_EPOCHS` as needed
-- Modify paths if necessary
+## Outputs
 
-## Quick Start
+Typical generated artifacts:
 
-### Full Pipeline
-```bash
-python run_experiment.py
-```
-
-### Quick Test
-```bash
-python run_experiment.py --quick-test
-```
-
-### Individual Steps
-
-1. **Train model**:
-```bash
-python train.py
-```
-
-2. **Analyze chaos**:
-```bash
-python analyze_chaos.py
-```
-
-3. **Generate plots**:
-```bash
-python visualize_results.py
-```
-
-## Model Architecture
-
-| Layer | Output Dimension |
-|-------|-----------------|
-| Embedding | 32 |
-| RNN | 60 |
-| Fully Connected | 1 |
-
-**Training:**
-- Optimizer: Adam (lr=0.0001)
-- Loss: Binary Cross Entropy  
-- Gradient clipping: 1.0
-- Batch Size: 32
-
-## Chaos Analysis Method
-
-The asymptotic stability analysis:
-
-1. Process input through RNN (first 500 timesteps)
-2. Add small perturbation to hidden state
-3. Continue both trajectories with zero inputs (timesteps 500-1599)
-4. Calculate distance between original and perturbed trajectories
-5. Compute geometric mean across test samples
-
-**Interpretation** (requires manual inspection):
-- **Order phase**: Asymptotic distance ≈ -15 (machine precision)
-- **Chaos phase**: Asymptotic distance > -10
-- **Transitions**: Sharp changes in asymptotic distance
-
-## Generated Outputs
-
-```
+```text
 results/
-├── training_history.json         # Loss and accuracy
-├── chaos_analysis_results.pkl    # Complete results
-├── analysis_summary.json         # Summary metrics
+├── training_history.json
+├── analysis_summary.json
+├── chaos_analysis_results.h5
 └── figures/
-    ├── training_curves.png       # Basic training curves
-    ├── chaos_dynamics.png        # Loss with asymptotic distances
-    └── bifurcation_diagram.png   # Hidden state trajectories
+    ├── training_curves.png
+    ├── test_loss_with_ftle.png
+    └── combined_bifurcation_animation_gpu.mov
 
 checkpoints/
-├── model_epoch_*.pt             # Checkpoints for each epoch
-└── best_model.pt                # Best model
+└── model_epoch_*.pt
 ```
 
-## Manual Inspection Guide
+## Interpretation Note
 
-After running the experiment, inspect the generated plots for:
+This codebase provides measurement and visualization tools.  
+Interpreting order/chaos transitions and linking them to generalization optima remains an active research task.
 
-### 1. Multiple Descent Cycles
-- Look at `training_curves.png`
-- Check test loss in overfitting regime (after minimum)
-- Count cycles of loss increase followed by sharp decrease
+## Project Status
 
-### 2. Order-Chaos Transitions
-- Look at `chaos_dynamics.png`
-- Identify regions where asymptotic distance is near -15 (order)
-- Identify regions where asymptotic distance is above -10 (chaos)
-- Note transitions between these regimes
-
-### 3. Correlation Analysis
-- Compare loss patterns with asymptotic distance changes
-- Check if loss decreases coincide with transitions
-- Note temporal relationships between dynamics
-
-### 4. Bifurcation Patterns
-- Look at `bifurcation_diagram.png`
-- Order phases show convergence (tight clusters)
-- Chaos phases show scattering (wide spread)
-
-## Computational Requirements
-
-**Training Time:**
-- 1,000 epochs: ~2-6 hours (hardware dependent)
-
-**Chaos Analysis:**  
-- 200 epochs: ~4-8 hours
-
-**Memory:**
-- GPU: 4GB+ VRAM recommended
-- RAM: 8GB+ system memory
-
-**Tips:**
-- Start with `--quick-test` for verification
-- Use GPU if available
-- Analyze fewer epochs initially
-
-## Key Parameters
-
-In `config.py`:
-
-```python
-# For faster experiments
-MAX_EPOCHS = 100
-NUM_TEST_SAMPLES = 100
-END_EPOCH = 50
-
-# For thorough analysis
-MAX_EPOCHS = 1000
-NUM_TEST_SAMPLES = 500
-END_EPOCH = 200
-```
-
-## Troubleshooting
-
-**CUDA out of memory**:
-- Reduce `BATCH_SIZE` in config
-- Use `DEVICE = 'cpu'`
-
-**Dataset download fails**:
-- Manually download from Kaggle
-- Place in `data/` directory
-
-**Long analysis time**:
-- Reduce `NUM_TEST_SAMPLES`
-- Analyze fewer epochs
-- Use `--quick-test` mode
-
-**Missing checkpoints**:
-- Ensure training completed
-- Check `checkpoints/` directory
-
-## Analysis Checklist
-
-- [ ] Training converges and shows overfitting
-- [ ] Asymptotic distances calculated successfully
-- [ ] Visualizations generated
-- [ ] Manual inspection completed
-- [ ] Patterns documented
-
-## Notes
-
-- This code provides the computational tools for chaos analysis
-- Pattern detection requires manual inspection and judgment
-- Results may vary based on random initialization
-- Multiple runs may be needed for robust conclusions
+- Active, ongoing research
+- Code and analysis protocol may change as hypotheses are refined
+- Planned additions include stronger statistical tests and multi-seed robustness analysis
