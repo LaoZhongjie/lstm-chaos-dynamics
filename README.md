@@ -1,4 +1,4 @@
-# Edge of Chaos in Deep Recurrent Networks (Ongoing Research)
+# Edge of Chaos in Deep Recurrent Networks (Ongoing)
 
 This repository contains an ongoing research pipeline for studying whether the **generalization optimum** of deep recurrent networks emerges near the **critical dynamical regime** (the *edge of chaos*).
 
