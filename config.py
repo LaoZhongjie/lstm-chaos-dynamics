@@ -16,6 +16,8 @@ PRETRAINED_CHECKPOINT = 'checkpoints/pretrained1.pt'
 # RNN specific parameters
 HIDDEN_SIZE = 60
 LEARNING_RATE = 0.0001
+# RNN cell type: 'lstm', 'gru', or 'rnn'
+RNN_CELL_TYPE = 'lstm'
 
 # Data split
 TRAIN_RATIO = 0.7
@@ -30,8 +32,10 @@ MACHINE_PRECISION_THRESHOLD = -15
 # - eps: initial perturbation magnitude (should be small, but not underflow)
 # - window_length: renormalize every N zero-drive steps
 # - burn_in: skip the first N zero-drive steps when accumulating the exponent
-FTLE_EPS = 1e-3
-FTLE_WINDOW_LENGTHS = [10, 20, 50, 100]
+# FTLE_EPS = [1e-6, 3e-6, 5e-6, 8e-6, 1e-5, 3e-5, 5e-5]
+# FTLE_WINDOW_LENGTHS = [3, 5, 7, 10, 13, 15]
+FTLE_EPS = [1e-5]
+FTLE_WINDOW_LENGTHS = [5]
 FTLE_BURN_IN = 200
 
 # Device and reproducibility

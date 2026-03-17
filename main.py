@@ -7,6 +7,7 @@ import sys
 import argparse
 import time
 from datetime import datetime
+from typing import Optional
 import torch
 import config
 from train import LSTMTrainer
@@ -68,7 +69,15 @@ class ExperimentRunner:
             print(f"✗ RNN training failed: {str(e)}")
             return False
     
-    def run_chaos_analysis(self, max_analysis_epochs=config.MAX_EPOCHS):
+    def run_chaos_analysis(
+        self,
+        max_analysis_epochs=config.MAX_EPOCHS,
+        *,
+        epochs_to_check=None,
+        start_epoch: int = 1,
+        end_epoch: Optional[int] = None,
+        interval: int = 1,
+    ):
         print("STEP 2: CHAOS ANALYSIS")
         print("-" * 40)
         
@@ -80,13 +89,16 @@ class ExperimentRunner:
                 print("✗ No training history found. Please run training first.")
                 return False
             
-            print(f"Starting chaos analysis for first {max_analysis_epochs} epochs...")
+            if end_epoch is None:
+                end_epoch = max_analysis_epochs
+            print(f"Starting chaos analysis (max_analysis_epochs={max_analysis_epochs})...")
             print()
             
             epochs, *_ = analyzer.analyze_chaos_dynamics(
-                start_epoch= 1, 
-                end_epoch=max_analysis_epochs, 
-                interval=1
+                start_epoch=start_epoch,
+                end_epoch=end_epoch,
+                interval=interval,
+                epochs_to_check=epochs_to_check,
             )
             
             analyzer.save_results()
@@ -146,18 +158,6 @@ class ExperimentRunner:
         print(f"Checkpoints directory: {config.CHECKPOINT_PATH}")
         print()
         
-        # Check what was completed
-        files_to_check = [
-            ('training_history.json', 'Training completed'),
-            ('chaos_analysis_results.h5', 'Chaos analysis completed'),
-            ('figures/test_loss_with_ftle.png', 'Visualizations generated')
-        ]
-        
-        for filename, description in files_to_check:
-            filepath = os.path.join(config.RESULTS_PATH, filename)
-            status = "✓" if os.path.exists(filepath) else "✗"
-            print(f"{status} {description}")
-        
         print("="*80)
 
 def main():
@@ -166,6 +166,12 @@ def main():
                        help='short for training epochs, number of training epochs')
     parser.add_argument('-ae', type=int, default=config.MAX_EPOCHS,
                        help='short for analysis epochs, number of epochs to analyze')
+    parser.add_argument('--epochs_to_check', type=str, default=None,
+                       help='Comma-separated explicit epochs to analyze, e.g. "11,50,100,300,600,900"')
+    parser.add_argument('--epoch_range', type=str, default=None,
+                       help='Epoch range to analyze (inclusive), e.g. "600-1000"')
+    parser.add_argument('--analysis_interval', type=int, default=1,
+                       help='Stride for range-based analysis (default 1)')
     parser.add_argument('-ve', type=int, default=config.MAX_EPOCHS,
                        help='short for visualization epochs, only visualize first N epochs')
     parser.add_argument('-st', action='store_true',
@@ -201,7 +207,33 @@ def main():
     
     # Step 2: Chaos Analysis
     if not args.sa:
-        success = success and runner.run_chaos_analysis(args.ae)
+        epochs_to_check = None
+        start_epoch = 1
+        end_epoch = args.ae
+        if args.epochs_to_check:
+            try:
+                epochs_to_check = [int(x.strip()) for x in args.epochs_to_check.split(",") if x.strip()]
+            except Exception:
+                parser.error('--epochs_to_check must be a comma-separated list of integers, e.g. "11,50,100"')
+        if args.epoch_range:
+            s = args.epoch_range.strip()
+            sep = "-" if "-" in s else (":" if ":" in s else None)
+            if sep is None:
+                parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
+            try:
+                a, b = s.split(sep, 1)
+                start_epoch = int(a.strip())
+                end_epoch = int(b.strip())
+            except Exception:
+                parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
+
+        success = success and runner.run_chaos_analysis(
+            max_analysis_epochs=args.ae,
+            epochs_to_check=epochs_to_check,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            interval=args.analysis_interval,
+        )
         if not success:
             print("Analysis failed. Stopping experiment.")
             return

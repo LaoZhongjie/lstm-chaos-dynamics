@@ -38,9 +38,12 @@ class FTLEBenettinAnalyzer:
         self.zero_input_timesteps = int(zero_input_timesteps)
         self.burn_in = int(burn_in)
         self.clamp_min = float(clamp_min)
-
+        self.cell_type = getattr(model, "cell_type", "lstm").lower()
+        
         # Keep eps as a device scalar to avoid host->device churn in tight loops.
-        self.eps = torch.tensor(float(eps), dtype=torch.float32, device=device)
+        # Keep eps in float64 for FTLE arithmetic (logs/norm ratios).
+        # Note: the LSTM forward must remain float32/float16; we cast eps to state dtype when perturbing.
+        self.eps = torch.tensor(float(eps), dtype=torch.float64, device=device)
 
         # Model stores embedding_dim on the instance; keep a robust fallback.
         self.embedding_dim = int(getattr(model, "embedding_dim", config.EMBEDDING_DIM))
@@ -56,7 +59,7 @@ class FTLEBenettinAnalyzer:
                 If provided, it will be normalized per-sample.
 
         Returns:
-            ftle_per_sample: FloatTensor [B] (float32) on `self.device`.
+            ftle_per_sample: FloatTensor [B] (float32) on `self.device` (computed in float64, returned as float32).
             ftle_mean: Python float (mean over samples).
         """
         prev_mode = self.model.training
@@ -82,10 +85,10 @@ class FTLEBenettinAnalyzer:
                         2 * hidden_size,
                         generator=self._w0_generator,
                         device=self.device,
-                        dtype=h.dtype,
+                        dtype=torch.float64,
                     )
                 else:
-                    w0 = w0.to(device=self.device, dtype=h.dtype)
+                    w0 = w0.to(device=self.device, dtype=torch.float64)
 
                 if w0.ndim != 2 or w0.shape[0] != batch_size:
                     raise ValueError(f"w0 must have shape [B, 2H] (or [B, H]); got {tuple(w0.shape)}.")
@@ -95,10 +98,12 @@ class FTLEBenettinAnalyzer:
                 elif w0.shape[1] != 2 * hidden_size:
                     raise ValueError(f"w0 must have shape [B, 2H] (or [B, H]); got {tuple(w0.shape)}.")
 
+                # Normalize in float64, then cast direction to state dtype for evolution.
                 w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
-                eps = self.eps.to(h.dtype)
-                h_p = h + eps * w0[:, :hidden_size]
-                c_p = c + eps * w0[:, hidden_size:]
+                eps_state = self.eps.to(dtype=h.dtype)
+                w0_state = w0.to(dtype=h.dtype)
+                h_p = h + eps_state * w0_state[:, :hidden_size]
+                c_p = c + eps_state * w0_state[:, hidden_size:]
 
                 # 3) Block schedule for the zero-drive segment
                 burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
@@ -114,7 +119,7 @@ class FTLEBenettinAnalyzer:
                 t_eff = int(sum(block_lengths[burn_blocks:]))
 
                 sum_logs = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
-                eps64 = self.eps.to(torch.float64)
+                eps64 = self.eps  # float64 device scalar
 
                 # Pre-allocate zero-input blocks (2B because we evolve natural + perturbed together).
                 zero_full = torch.zeros(
@@ -151,16 +156,20 @@ class FTLEBenettinAnalyzer:
                     c, c_p = cc_out[:batch_size], cc_out[batch_size:]
 
                     # Separation and log-growth
-                    delta = torch.cat([h_p - h, c_p - c], dim=1)  # (B, 2H)
-                    r_t = delta.norm(dim=1).clamp_min(self.clamp_min)  # (B,)
+                    # Compute FTLE arithmetic in float64 (but keep states in float32 for LSTM).
+                    dh = (h_p - h).to(torch.float64)
+                    dc = (c_p - c).to(torch.float64)
+                    delta64 = torch.cat([dh, dc], dim=1)  # (B, 2H) float64
+                    r_t64 = delta64.norm(dim=1).clamp_min(self.clamp_min)  # (B,) float64
 
                     if k >= burn_blocks:
-                        sum_logs += torch.log(r_t.to(torch.float64) / eps64)
+                        sum_logs += torch.log(r_t64 / eps64)
 
                     # Renormalize perturbed state along current separation direction.
-                    dir_vec = delta / r_t.unsqueeze(1)
-                    h_p = h + eps * dir_vec[:, :hidden_size]
-                    c_p = c + eps * dir_vec[:, hidden_size:]
+                    dir_vec64 = delta64 / r_t64.unsqueeze(1)  # float64 unit direction
+                    dir_vec_state = dir_vec64.to(dtype=h.dtype)
+                    h_p = h + eps_state * dir_vec_state[:, :hidden_size]
+                    c_p = c + eps_state * dir_vec_state[:, hidden_size:]
 
                 ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
                 ftle_mean = float(ftle_per_sample.mean().item())

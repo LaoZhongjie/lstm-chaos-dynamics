@@ -43,7 +43,11 @@ class AnalysisRunner:
         self.ftle_window_lengths = sorted({int(w) for w in configured_window_lengths if int(w) > 0})
         if not self.ftle_window_lengths:
             raise ValueError("FTLE_WINDOW_LENGTHS must contain at least one positive integer.")
-        
+        configured_eps = getattr(config, 'FTLE_EPS', 1e-3)
+        eps_list = configured_eps if isinstance(configured_eps, (list, tuple)) else [configured_eps]
+        self.ftle_eps_values = [float(e) for e in eps_list if float(e) > 0]
+        if not self.ftle_eps_values:
+            raise ValueError("FTLE_EPS must contain at least one positive value.")
         # Results storage
         self.results = {
             'epochs': [],
@@ -55,6 +59,7 @@ class AnalysisRunner:
             'analyzed_epochs': [],
             'bifurcation_data': [],
             'sample_indices': [],
+            'ftle_eps_values': self.ftle_eps_values,
             'ftle_window_lengths': self.ftle_window_lengths,
             'ftle_mean_by_window': [],
         }
@@ -81,18 +86,20 @@ class AnalysisRunner:
             seed_manager=self.seed_manager,
         )
         
-        # Initialize FTLE analyzers (Benettin) for multiple window lengths.
-        for window_length in self.ftle_window_lengths:
-            self.ftle_analyzers[window_length] = FTLEBenettinAnalyzer(
-                self.model,
-                self.device,
-                eps=config.FTLE_EPS,
-                window_length=window_length,
-                zero_input_timesteps=config.ZERO_INPUT_TIMESTEPS,
-                burn_in=config.FTLE_BURN_IN,
-                seed_manager=self.seed_manager,
-            )
-        print(f"FTLE window lengths: {self.ftle_window_lengths}")
+        # Initialize FTLE analyzers (Benettin) for each (eps, window_length).
+        for eps_val in self.ftle_eps_values:
+            for window_length in self.ftle_window_lengths:
+                key = (eps_val, window_length)
+                self.ftle_analyzers[key] = FTLEBenettinAnalyzer(
+                    self.model,
+                    self.device,
+                    eps=eps_val,
+                    window_length=window_length,
+                    zero_input_timesteps=config.ZERO_INPUT_TIMESTEPS,
+                    burn_in=config.FTLE_BURN_IN,
+                    seed_manager=self.seed_manager,
+                )
+        print(f"FTLE eps: {self.ftle_eps_values}, window lengths: {self.ftle_window_lengths}")
         self._prepare_analysis_samples()
         
         print(f"Data loaded. Test dataset size: {len(self.test_dataset)}")
@@ -123,9 +130,8 @@ class AnalysisRunner:
         # Token batch: [B, T] on analysis device.
         tokens = torch.stack([self.test_dataset[i][0] for i in indices], dim=0).to(self.device)
 
-        # Fixed random direction per-sample (normalized to unit norm). 
+        # Fixed random direction per-sample.
         w0 = torch.randn(n, 2 * config.HIDDEN_SIZE, generator=w0_generator).to(self.device)
-        w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
         
         self.sample_indices = indices
         self.sample_tokens = tokens
@@ -155,13 +161,55 @@ class AnalysisRunner:
         
         return True
     
-    def analyze_chaos_dynamics(self, start_epoch=1, end_epoch=None, interval=1):   
-        if end_epoch is None:
-            end_epoch = len(self.results['epochs'])
-            
-        print(f"Analyzing chaos dynamics from epoch {start_epoch} to {end_epoch}...")
-        
-        epochs_to_analyze = list(range(start_epoch, min(end_epoch + 1, len(self.results['epochs']) + 1), interval))
+    def analyze_chaos_dynamics(self, start_epoch=1, end_epoch=None, interval=1, epochs_to_check=None):
+        """
+        Analyze chaos dynamics for selected epochs.
+
+        Args:
+            start_epoch: inclusive start epoch (1-indexed) used when epochs_to_check is None
+            end_epoch: inclusive end epoch (1-indexed) used when epochs_to_check is None
+            interval: stride used when epochs_to_check is None
+            epochs_to_check: optional explicit list/tuple of epochs to analyze (1-indexed).
+                When provided, it takes precedence over start/end/interval.
+        """
+        total_epochs = len(self.results.get('epochs', []))
+        if total_epochs <= 0:
+            raise ValueError("Training history is empty. Load training history before analysis.")
+
+        if epochs_to_check is not None:
+            if isinstance(epochs_to_check, (int, np.integer)):
+                epochs_raw = [int(epochs_to_check)]
+            else:
+                epochs_raw = [int(e) for e in list(epochs_to_check)]
+            # keep unique while preserving order
+            seen = set()
+            epochs_to_analyze = []
+            for e in epochs_raw:
+                if e in seen:
+                    continue
+                seen.add(e)
+                if 1 <= e <= total_epochs:
+                    epochs_to_analyze.append(e)
+            if not epochs_to_analyze:
+                raise ValueError(f"epochs_to_check has no valid epochs in [1, {total_epochs}].")
+            print(f"Analyzing chaos dynamics for epochs: {epochs_to_analyze}")
+        else:
+            if end_epoch is None:
+                end_epoch = total_epochs
+            start_epoch = int(start_epoch)
+            end_epoch = int(end_epoch)
+            interval = int(interval)
+            if interval <= 0:
+                raise ValueError("interval must be a positive integer.")
+            if start_epoch < 1:
+                start_epoch = 1
+            if end_epoch > total_epochs:
+                end_epoch = total_epochs
+            if start_epoch > end_epoch:
+                raise ValueError(f"start_epoch ({start_epoch}) must be <= end_epoch ({end_epoch}).")
+
+            print(f"Analyzing chaos dynamics from epoch {start_epoch} to {end_epoch} (interval={interval})...")
+            epochs_to_analyze = list(range(start_epoch, end_epoch + 1, interval))
         
         bifurcation_data = []
         
@@ -174,11 +222,14 @@ class AnalysisRunner:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
 
                 epoch_ftle_means = []
-                for window_length in self.ftle_window_lengths:
-                    _, ftle_avg = self.ftle_analyzers[window_length].compute_ftle_benettin(
-                        self.sample_tokens, w0=self.w0
-                    )
-                    epoch_ftle_means.append(ftle_avg)
+                for eps_val in self.ftle_eps_values:
+                    eps_row = []
+                    for window_length in self.ftle_window_lengths:
+                        _, ftle_avg = self.ftle_analyzers[(eps_val, window_length)].compute_ftle_benettin(
+                            self.sample_tokens, w0=self.w0
+                        )
+                        eps_row.append(ftle_avg)
+                    epoch_ftle_means.append(eps_row)
                 ftle_mean_by_window.append(epoch_ftle_means)
                 
                 h_states_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
@@ -191,11 +242,13 @@ class AnalysisRunner:
             except FileNotFoundError:
                 print(f"Checkpoint not found for epoch {epoch}")
                 bifurcation_data.append([])
-                ftle_mean_by_window.append([float("nan")] * len(self.ftle_window_lengths))
+                nan_row = [[float("nan")] * len(self.ftle_window_lengths) for _ in self.ftle_eps_values]
+                ftle_mean_by_window.append(nan_row)
                 
         self.results['analyzed_epochs'] = epochs_to_analyze
         self.results['bifurcation_data'] = bifurcation_data
         self.results['sample_indices'] = self.sample_indices
+        self.results['ftle_eps_values'] = self.ftle_eps_values
         self.results['ftle_window_lengths'] = self.ftle_window_lengths
         self.results['ftle_mean_by_window'] = ftle_mean_by_window
         
@@ -207,7 +260,7 @@ class AnalysisRunner:
     def save_results(self):
         analyzed_epochs = self.results.get('analyzed_epochs', [])
         ftle_mean_by_window = np.array(self.results.get('ftle_mean_by_window', []), dtype=np.float64)
-        finite_mask = np.isfinite(ftle_mean_by_window)
+        finite_mask = np.isfinite(ftle_mean_by_window)  # works for 2D or 3D
         
         summary = {
             'summary': {
@@ -225,6 +278,7 @@ class AnalysisRunner:
             },
             'ftle': {
                 'analyzed_epochs': analyzed_epochs,
+                'eps_values': self.results.get('ftle_eps_values', []),
                 'window_lengths': self.results.get('ftle_window_lengths', []),
                 'ftle_mean_by_window': self.results.get('ftle_mean_by_window', []),
             },
@@ -238,21 +292,23 @@ class AnalysisRunner:
         save_experiment_config(extra={
             "run_type": "analysis",
             **summary.get("summary", {}),
+            "ftle_eps_values": self.results.get("ftle_eps_values", []),
             "ftle_window_lengths": self.results.get("ftle_window_lengths", []),
         })
         
         # Save result as HDF5 for efficient storage
         # 1. 批量将列表转成 NumPy 数组（根据数据类型选合适的 dtype，进一步省空间）
         dtype_mapping = {
-            'epochs': np.int16,       
-            'train_loss': np.float32,    
+            'epochs': np.int16,
+            'train_loss': np.float32,
             'test_loss': np.float32,
             'train_accuracy': np.float32,
             'test_accuracy': np.float32,
-            'grad_norms': np.float32, 
+            'grad_norms': np.float32,
             'analyzed_epochs': np.int16,
             'bifurcation_data': np.float32,
             'sample_indices': np.int32,
+            'ftle_eps_values': np.float64,
             'ftle_window_lengths': np.int16,
             'ftle_mean_by_window': np.float32,
         }
