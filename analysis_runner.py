@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 import config
 from model import LSTM
+from config_saver import save_experiment_config
 from data_loader import IMDBDataLoader
 from asymptotic_analyzer import HiddenStateAnalyzer
 from ftle_analyzer import FTLEBenettinAnalyzer
@@ -36,6 +37,12 @@ class AnalysisRunner:
         self.sample_indices = None
         self.sample_tokens = None
         self.w0 = None
+        self.ftle_analyzers = {}
+
+        configured_window_lengths = getattr(config, 'FTLE_WINDOW_LENGTHS', [])
+        self.ftle_window_lengths = sorted({int(w) for w in configured_window_lengths if int(w) > 0})
+        if not self.ftle_window_lengths:
+            raise ValueError("FTLE_WINDOW_LENGTHS must contain at least one positive integer.")
         
         # Results storage
         self.results = {
@@ -48,8 +55,8 @@ class AnalysisRunner:
             'analyzed_epochs': [],
             'bifurcation_data': [],
             'sample_indices': [],
-            'ftle_mean': [],
-            'ftle_per_sample': []
+            'ftle_window_lengths': self.ftle_window_lengths,
+            'ftle_mean_by_window': [],
         }
 
     def load_data_and_model(self):
@@ -74,16 +81,18 @@ class AnalysisRunner:
             seed_manager=self.seed_manager,
         )
         
-        # Initialize FTLE analyzer (Benettin)
-        self.ftle_analyzer = FTLEBenettinAnalyzer(
-            self.model,
-            self.device,
-            eps=config.FTLE_EPS,
-            window_length=config.FTLE_WINDOW_LENGTH,
-            zero_input_timesteps=config.ZERO_INPUT_TIMESTEPS,
-            burn_in=config.FTLE_BURN_IN,
-            seed_manager=self.seed_manager,
-        )
+        # Initialize FTLE analyzers (Benettin) for multiple window lengths.
+        for window_length in self.ftle_window_lengths:
+            self.ftle_analyzers[window_length] = FTLEBenettinAnalyzer(
+                self.model,
+                self.device,
+                eps=config.FTLE_EPS,
+                window_length=window_length,
+                zero_input_timesteps=config.ZERO_INPUT_TIMESTEPS,
+                burn_in=config.FTLE_BURN_IN,
+                seed_manager=self.seed_manager,
+            )
+        print(f"FTLE window lengths: {self.ftle_window_lengths}")
         self._prepare_analysis_samples()
         
         print(f"Data loaded. Test dataset size: {len(self.test_dataset)}")
@@ -156,8 +165,7 @@ class AnalysisRunner:
         
         bifurcation_data = []
         
-        ftle_mean = []
-        ftle_per_sample = []
+        ftle_mean_by_window = []
         
         for epoch in tqdm(epochs_to_analyze, desc="Chaos analysis"):
             try:
@@ -165,9 +173,13 @@ class AnalysisRunner:
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
                 self.model.load_state_dict(checkpoint['model_state_dict'])
 
-                ftle_batch, ftle_avg = self.ftle_analyzer.compute_ftle_benettin(self.sample_tokens, w0=self.w0)
-                ftle_per_sample.append(ftle_batch.detach().cpu().numpy())
-                ftle_mean.append(ftle_avg)
+                epoch_ftle_means = []
+                for window_length in self.ftle_window_lengths:
+                    _, ftle_avg = self.ftle_analyzers[window_length].compute_ftle_benettin(
+                        self.sample_tokens, w0=self.w0
+                    )
+                    epoch_ftle_means.append(ftle_avg)
+                ftle_mean_by_window.append(epoch_ftle_means)
                 
                 h_states_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
                     self.test_dataset, self.sample_indices, epoch
@@ -179,22 +191,23 @@ class AnalysisRunner:
             except FileNotFoundError:
                 print(f"Checkpoint not found for epoch {epoch}")
                 bifurcation_data.append([])
+                ftle_mean_by_window.append([float("nan")] * len(self.ftle_window_lengths))
                 
         self.results['analyzed_epochs'] = epochs_to_analyze
         self.results['bifurcation_data'] = bifurcation_data
         self.results['sample_indices'] = self.sample_indices
-        self.results['ftle_mean'] = ftle_mean
-        self.results['ftle_per_sample'] = ftle_per_sample
+        self.results['ftle_window_lengths'] = self.ftle_window_lengths
+        self.results['ftle_mean_by_window'] = ftle_mean_by_window
         
         print(f"Calculated asymptotic distances for {len(epochs_to_analyze)} epochs")
         print("Results saved for manual inspection")
         
-        return epochs_to_analyze, bifurcation_data, ftle_mean, ftle_per_sample
+        return epochs_to_analyze, bifurcation_data, ftle_mean_by_window
     
     def save_results(self):
         analyzed_epochs = self.results.get('analyzed_epochs', [])
-        ftle_mean = np.array(self.results.get('ftle_mean', []), dtype=np.float64)
-        finite_mask = np.isfinite(ftle_mean)
+        ftle_mean_by_window = np.array(self.results.get('ftle_mean_by_window', []), dtype=np.float64)
+        finite_mask = np.isfinite(ftle_mean_by_window)
         
         summary = {
             'summary': {
@@ -202,8 +215,8 @@ class AnalysisRunner:
                 'analyzed_epochs': len(analyzed_epochs),
                 'min_test_loss': float(min(self.results['test_loss'])),
                 'min_test_loss_epoch': int(np.argmin(self.results['test_loss']) + 1),
-                'ftle_mean_min': float(np.min(ftle_mean[finite_mask])) if np.any(finite_mask) else float("nan"),
-                'ftle_mean_max': float(np.max(ftle_mean[finite_mask])) if np.any(finite_mask) else float("nan"),
+                'ftle_mean_min': float(np.min(ftle_mean_by_window[finite_mask])) if np.any(finite_mask) else float("nan"),
+                'ftle_mean_max': float(np.max(ftle_mean_by_window[finite_mask])) if np.any(finite_mask) else float("nan"),
             },
             'training_curves': {
                 'epochs': self.results['epochs'],
@@ -212,7 +225,8 @@ class AnalysisRunner:
             },
             'ftle': {
                 'analyzed_epochs': analyzed_epochs,
-                'ftle_mean': self.results.get('ftle_mean', []),
+                'window_lengths': self.results.get('ftle_window_lengths', []),
+                'ftle_mean_by_window': self.results.get('ftle_mean_by_window', []),
             },
         }
         
@@ -220,6 +234,12 @@ class AnalysisRunner:
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)
         print(f"Summary saved to {summary_path}")
+
+        save_experiment_config(extra={
+            "run_type": "analysis",
+            **summary.get("summary", {}),
+            "ftle_window_lengths": self.results.get("ftle_window_lengths", []),
+        })
         
         # Save result as HDF5 for efficient storage
         # 1. 批量将列表转成 NumPy 数组（根据数据类型选合适的 dtype，进一步省空间）
@@ -233,8 +253,8 @@ class AnalysisRunner:
             'analyzed_epochs': np.int16,
             'bifurcation_data': np.float32,
             'sample_indices': np.int32,
-            'ftle_mean': np.float32,
-            'ftle_per_sample': np.float32,
+            'ftle_window_lengths': np.int16,
+            'ftle_mean_by_window': np.float32,
         }
         
         # 列表 → NumPy 数组

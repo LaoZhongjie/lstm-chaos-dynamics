@@ -13,6 +13,7 @@ from datetime import datetime
 
 import config
 from model import LSTM
+from config_saver import save_experiment_config
 from data_loader import IMDBDataLoader
 from seed_utils import HierarchicalSeedManager
 
@@ -227,6 +228,16 @@ class LSTMTrainer:
         
         # Final save
         self.save_training_history()
+        save_experiment_config(extra={
+            "run_type": "training",
+            "best_epoch": self.best_epoch,
+            "best_test_loss": float(self.best_test_loss),
+            "total_epochs": max_epochs,
+            "vocab_size": self.data_loader.vocab_size,
+            "pretrained_checkpoint": config.PRETRAINED_CHECKPOINT,
+            "embedding_fix": config.EMBEDDING_FIX,
+            "fc_fix": config.FC_FIX,
+        })
         
         return self.training_history
     

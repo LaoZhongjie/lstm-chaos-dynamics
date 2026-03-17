@@ -102,7 +102,7 @@ class ExperimentRunner:
             print(f"✗ Chaos analysis failed: {str(e)}")
             return False
     
-    def run_visualization(self):
+    def run_visualization(self, visualization_epochs=config.MAX_EPOCHS):
         print("STEP 3: GENERATING VISUALIZATIONS")
         print("-" * 40)
 
@@ -118,13 +118,13 @@ class ExperimentRunner:
         test_loss_ftle_path = os.path.join(figures_dir, 'test_loss_with_ftle.png')
         combined_anim_gpu_path = os.path.join(figures_dir, 'combined_bifurcation_animation_gpu.mov')
 
-        visualizer.plot_training_curves(save_path=training_curves_path)
-        visualizer.plot_test_loss_with_ftle(save_path=test_loss_ftle_path)
+        visualizer.plot_training_curves(save_path=training_curves_path, max_epoch=visualization_epochs)
+        visualizer.plot_test_loss_with_ftle(save_path=test_loss_ftle_path, max_epoch=visualization_epochs)
         visualizer.plot_test_loss_bifurcation_animation_gpu(
             video_path=combined_anim_gpu_path,
             subsample_epochs=1,
             subsample_samples=config.NUM_TEST_SAMPLES,
-            point_radius=3,
+            max_epoch=visualization_epochs,
         )
 
         print(f"✓ Visualizations completed. Files saved to {figures_dir}")
@@ -166,6 +166,8 @@ def main():
                        help='short for training epochs, number of training epochs')
     parser.add_argument('-ae', type=int, default=config.MAX_EPOCHS,
                        help='short for analysis epochs, number of epochs to analyze')
+    parser.add_argument('-ve', type=int, default=config.MAX_EPOCHS,
+                       help='short for visualization epochs, only visualize first N epochs')
     parser.add_argument('-st', action='store_true',
                        help='Skip training if results exist')
     parser.add_argument('-sa', action='store_true', 
@@ -176,6 +178,8 @@ def main():
                        help='Quick test run (50 train epochs, 20 analysis epochs)')
     
     args = parser.parse_args()
+    if args.ve is not None and args.ve <= 0:
+        parser.error("-ve must be a positive integer")
     
     # Quick test mode
     if args.qt:
@@ -204,7 +208,7 @@ def main():
     
     # Step 3: Visualization
     if not args.sv:
-        success = success and runner.run_visualization()
+        success = success and runner.run_visualization(args.ve)
     
     # Print summary
     runner.print_summary()

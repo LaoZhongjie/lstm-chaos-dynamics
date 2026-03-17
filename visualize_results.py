@@ -2,6 +2,7 @@ import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 import warnings
 warnings.filterwarnings('ignore')
@@ -29,7 +30,7 @@ class ResultsVisualizer:
             'axes.titlesize': 20,
             'xtick.labelsize': 11,
             'ytick.labelsize': 11,
-            'legend.fontsize': 12,
+            'legend.fontsize': 10,
             'figure.titlesize': 20,
             'lines.linewidth': 2,
             'axes.linewidth': 1.5,
@@ -51,8 +52,8 @@ class ResultsVisualizer:
             'analyzed_epochs',
             'bifurcation_data',
             'sample_indices',
-            'ftle_mean',
-            'ftle_per_sample',
+            'ftle_window_lengths',
+            'ftle_mean_by_window',
         }
         def _load_h5(path):
             if not os.path.exists(path):
@@ -85,25 +86,37 @@ class ResultsVisualizer:
         print("[load_results] Loaded h5 data.", flush=True)
         return True
     
-    def plot_training_curves(self, save_path=None):
+    def plot_training_curves(self, save_path=None, max_epoch: Optional[int] = None):
         print("Generating training_curves plot...")
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
         
-        epochs = self.results.get('epochs', [])
-        test_loss = self.results.get('test_loss', [])
-        test_accuracy = self.results.get('test_accuracy', [])
-        train_loss = self.results.get('train_loss', [])
-        train_accuracy = self.results.get('train_accuracy', [])
+        epochs = np.asarray(self.results.get('epochs', []))
+        test_loss = np.asarray(self.results.get('test_loss', []), dtype=np.float32)
+        test_accuracy = np.asarray(self.results.get('test_accuracy', []), dtype=np.float32)
+        train_loss = np.asarray(self.results.get('train_loss', []), dtype=np.float32)
+        train_accuracy = np.asarray(self.results.get('train_accuracy', []), dtype=np.float32)
+        if epochs.size == 0:
+            raise ValueError("Missing epochs data for training curves.")
+
+        epoch_upper = int(np.max(epochs))
+        if max_epoch is not None:
+            epoch_upper = min(epoch_upper, int(max_epoch))
+        epoch_mask = epochs <= epoch_upper
+        plot_epochs = epochs[epoch_mask]
+        plot_test_loss = test_loss[epoch_mask]
+        plot_train_loss = train_loss[epoch_mask]
+        plot_test_accuracy = test_accuracy[epoch_mask] if test_accuracy.size > 0 else test_accuracy
+        plot_train_accuracy = train_accuracy[epoch_mask] if train_accuracy.size > 0 else train_accuracy
         
         # Plot 1: Loss curves
-        ax1.plot(epochs, train_loss, color='blue', linewidth=1, label='Train Loss', alpha=0.7)
-        ax1.plot(epochs, test_loss, color='brown', linewidth=1, label='Test Loss')
+        ax1.plot(plot_epochs, plot_train_loss, color='blue', linewidth=1, label='Train Loss', alpha=0.7)
+        ax1.plot(plot_epochs, plot_test_loss, color='brown', linewidth=1, label='Test Loss')
         
         # Mark global optimum
-        min_loss_idx = np.argmin(test_loss)
-        global_opt_epoch = epochs[min_loss_idx]
-        global_opt_loss = test_loss[min_loss_idx]
+        min_loss_idx = np.argmin(plot_test_loss)
+        global_opt_epoch = plot_epochs[min_loss_idx]
+        global_opt_loss = plot_test_loss[min_loss_idx]
         
         ax1.plot(global_opt_epoch, global_opt_loss, 'ro', markersize=10, 
                 label=f'Global Optimum (Epoch {global_opt_epoch})')
@@ -115,10 +128,10 @@ class ResultsVisualizer:
         ax1.legend()
         
         # Plot 2: Accuracy curves
-        if test_accuracy and train_accuracy:
-            ax2.plot(epochs, train_accuracy, color='blue', linewidth=1, 
+        if plot_test_accuracy.size > 0 and plot_train_accuracy.size > 0:
+            ax2.plot(plot_epochs, plot_train_accuracy, color='blue', linewidth=1, 
                     label='Train Accuracy', alpha=0.7)
-            ax2.plot(epochs, test_accuracy, color='brown', linewidth=1, 
+            ax2.plot(plot_epochs, plot_test_accuracy, color='brown', linewidth=1, 
                     label='Test Accuracy')
             ax2.set_xlabel('Training Epochs', fontsize=16)
             ax2.set_ylabel('Accuracy (%)', fontsize=16)
@@ -137,19 +150,54 @@ class ResultsVisualizer:
         
         plt.show()
     
-    def plot_test_loss_with_ftle(self, *, save_path: Optional[str] = None) -> None:
+    def plot_test_loss_with_ftle(self, *, save_path: Optional[str] = None, max_epoch: Optional[int] = None) -> None:
         print("Generating test_loss_with_ftle plot...")
         epochs = np.asarray(self.results.get("epochs", []))
         test_loss = np.asarray(self.results.get("test_loss", []), dtype=np.float32)
         analyzed_epochs = np.asarray(self.results.get("analyzed_epochs", []))
-        ftle_mean = np.asarray(self.results.get("ftle_mean", []), dtype=np.float32)
+        ftle_window_lengths = np.asarray(self.results.get("ftle_window_lengths", []), dtype=np.int32)
+        ftle_mean_by_window = np.asarray(self.results.get("ftle_mean_by_window", []), dtype=np.float32)
+        if epochs.size == 0 or test_loss.size == 0:
+            raise ValueError("Missing epochs/test_loss data for plotting.")
+        if analyzed_epochs.size == 0:
+            raise ValueError("Missing analyzed_epochs data for plotting.")
+        if ftle_window_lengths.size == 0:
+            raise ValueError("Missing ftle_window_lengths data for plotting.")
+        if ftle_mean_by_window.ndim != 2:
+            raise ValueError("ftle_mean_by_window must be a 2D array [epochs, windows].")
+        if ftle_mean_by_window.shape[1] != ftle_window_lengths.size:
+            raise ValueError(
+                f"Mismatch between ftle_mean_by_window columns ({ftle_mean_by_window.shape[1]}) "
+                f"and ftle_window_lengths ({ftle_window_lengths.size})."
+            )
+
+        epoch_upper = int(np.max(analyzed_epochs))
+        if max_epoch is not None:
+            epoch_upper = min(epoch_upper, int(max_epoch))
+        epoch_mask = epochs <= epoch_upper
+        plot_epochs = epochs[epoch_mask]
+        plot_test_loss = test_loss[epoch_mask]
+        if plot_epochs.size == 0:
+            raise ValueError(f"No test-loss points available up to analyzed epoch {epoch_upper}.")
+
+        valid_ftle_len = min(analyzed_epochs.size, ftle_mean_by_window.shape[0])
+        aligned_analyzed_epochs = analyzed_epochs[:valid_ftle_len]
+        aligned_ftle_mean_by_window = ftle_mean_by_window[:valid_ftle_len, :]
+        analyzed_mask = aligned_analyzed_epochs <= epoch_upper
+        plot_analyzed_epochs = aligned_analyzed_epochs[analyzed_mask]
+        plot_ftle_mean_by_window = aligned_ftle_mean_by_window[analyzed_mask, :]
+        if plot_analyzed_epochs.size == 0:
+            raise ValueError(f"No FTLE points available up to analyzed epoch {epoch_upper}.")
 
         fig, ax1 = plt.subplots(figsize=(12, 5))
 
-        ax1.plot(epochs, test_loss, color="brown", linewidth=1.2, label="Test Loss")
+        if  ftle_window_lengths.size > 1:
+            ax1.plot(plot_epochs, plot_test_loss , '.--',color="brown", linewidth=1.2, label="Test Loss")
+        else:
+            ax1.plot(plot_epochs, plot_test_loss ,color="brown", linewidth=1.2, label="Test Loss")
         
-        min_loss_idx = np.argmin(test_loss)
-        global_opt_epoch = epochs[min_loss_idx]
+        min_loss_idx = np.argmin(plot_test_loss)
+        global_opt_epoch = plot_epochs[min_loss_idx]
         ax1.axvline(x=global_opt_epoch, color='r', linestyle='--',
                 label=f"Global Optimum (Epoch {global_opt_epoch})")
         
@@ -159,14 +207,37 @@ class ResultsVisualizer:
         ax1.set_ylabel("Test Loss", color="brown", fontsize=16)
         ax1.tick_params(axis="y", labelcolor="brown")
         ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(0, int(np.max(epochs)))
+        ax1.set_xlim(0, epoch_upper)
 
         ax2 = ax1.twinx()
-        ftle_color = "green"
-        ax2.plot(analyzed_epochs, ftle_mean, color=ftle_color, linewidth=1.2, label="Mean FTLE")
+        n_windows = int(ftle_window_lengths.size)
+        # High-contrast palette first, then golden-angle HSV expansion for larger N.
+        base_palette = [
+            "#008000", "#0072B2",  "#F0E442", "#E60000", "#D55E00",
+            "#56B4E9", "#CC79A7", "#000000", "#1B9E77", "#7570B3",
+            "#E7298A", "#66A61E",
+        ]
+        if n_windows <= len(base_palette):
+            ftle_colors = [mcolors.to_rgba(c) for c in base_palette[:n_windows]]
+        else:
+            ftle_colors = [mcolors.to_rgba(c) for c in base_palette]
+            hue = 0.0
+            golden_ratio = 0.618033988749895
+            for _ in range(n_windows - len(base_palette)):
+                hue = (hue + golden_ratio) % 1.0
+                ftle_colors.append(mcolors.to_rgba(mcolors.hsv_to_rgb((hue, 0.95, 0.92))))
+
+        for i, window_length in enumerate(ftle_window_lengths.tolist()):
+            ax2.plot(
+                plot_analyzed_epochs,
+                plot_ftle_mean_by_window[:, i],
+                color=ftle_colors[i],
+                linewidth=1.2,
+                label=f"Mean FTLE (w={int(window_length)})",
+            )
+        ax2.set_ylabel("FTLE", color="black", fontsize=16)
+        ax2.tick_params(axis="y", labelcolor="black")
         ax2.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
-        ax2.set_ylabel("FTLE", color=ftle_color, fontsize=16)
-        ax2.tick_params(axis="y", labelcolor=ftle_color)
 
         ymin, ymax = ax2.get_ylim()
         ax2.set_ylim(ymin, ymax)
@@ -175,7 +246,7 @@ class ResultsVisualizer:
 
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right", framealpha=0.6)
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right",framealpha=0.6)
 
         ax1.set_title("Test Loss vs. FTLE (Benettin)", fontsize=18)
         plt.tight_layout()
@@ -192,11 +263,11 @@ class ResultsVisualizer:
         video_path: str,
         subsample_epochs: int = 1,
         subsample_samples: int = 100,
+        max_epoch: Optional[int] = None,
         fps: int = 20,
         dpi: int = 100,
         device: Optional[str] = None,
         point_alpha: float = 0.5,
-        point_radius: int = 2,
         point_color: tuple = (31, 119, 180),
         codec: Optional[str] = None,
         frame_step: int = 2,
@@ -229,6 +300,24 @@ class ResultsVisualizer:
         epochs = np.asarray(self.results['epochs'])
         test_loss = np.asarray(self.results['test_loss'], dtype=np.float32)
         analyzed_epochs = np.asarray(self.results['analyzed_epochs'])
+        if epochs.size == 0 or analyzed_epochs.size == 0:
+            raise ValueError("Missing epochs/analyzed_epochs data for animation.")
+
+        epoch_upper = int(np.max(analyzed_epochs))
+        if max_epoch is not None:
+            epoch_upper = min(epoch_upper, int(max_epoch))
+        if epoch_upper < int(np.min(analyzed_epochs)):
+            raise ValueError(f"No analyzed epochs available up to {epoch_upper}.")
+
+        loss_mask = epochs <= epoch_upper
+        plot_epochs = epochs[loss_mask]
+        plot_test_loss = test_loss[loss_mask]
+        if plot_epochs.size == 0:
+            raise ValueError(f"No test-loss points available up to analyzed epoch {epoch_upper}.")
+        analyzed_mask = analyzed_epochs <= epoch_upper
+        available_epoch_indices = np.nonzero(analyzed_mask)[0]
+        if available_epoch_indices.size == 0:
+            raise ValueError(f"No analyzed epochs available up to analyzed epoch {epoch_upper}.")
 
         bifurcation_data = self.results.get('bifurcation_data', None)
         use_h5 = bifurcation_data is None and self.h5_path and os.path.exists(self.h5_path)
@@ -270,7 +359,7 @@ class ResultsVisualizer:
             except RuntimeError as exc:
                 print(f"[gpu_anim] GPU preload failed, fallback to CPU-resident data: {exc}", flush=True)
 
-        epoch_indices = np.arange(0, analyzed_epochs.size, max(1, int(subsample_epochs)))
+        epoch_indices = available_epoch_indices[::max(1, int(subsample_epochs))]
 
         selected_sample_count = min(int(subsample_samples), n_available_samples)
 
@@ -313,13 +402,13 @@ class ResultsVisualizer:
             return torch.from_numpy(vals_np).to(torch_device, non_blocking=(torch_device.type == "cuda"))
 
         print("[gpu_anim] Building base figure...", flush=True)
-        fig, ax = plt.subplots(figsize=(16, 8), dpi=dpi)
-        ax.plot(epochs, test_loss, color='brown', linewidth=1, label='Test Loss')
+        fig, ax = plt.subplots(figsize=(12, 8), dpi=dpi)
+        ax.plot(plot_epochs, plot_test_loss, color='brown', linewidth=1, label='Test Loss')
         ax.set_ylabel('Test Loss', color='brown', fontsize=16)
         ax.tick_params(axis='y', labelcolor='brown')
 
-        min_loss_idx = int(np.argmin(test_loss))
-        global_opt_epoch = epochs[min_loss_idx]
+        min_loss_idx = int(np.argmin(plot_test_loss))
+        global_opt_epoch = plot_epochs[min_loss_idx]
         ax.axvline(x=global_opt_epoch, color='r', linestyle='--', label=f"Global Optimum (Epoch {global_opt_epoch})")
 
         ax_twin = ax.twinx()
@@ -347,10 +436,10 @@ class ResultsVisualizer:
         ax.set_title('Test Loss + Bifurcation Map', fontsize=20)
         ax.grid(True, alpha=0.3)
 
-        ax_twin.scatter([], [], s=5, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
+        ax_twin.scatter([], [], s=0.3, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax_twin.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc='lower right', framealpha=0.5)
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="best",framealpha=0.5)
 
         print("[gpu_anim] Precomputing canvas and pixel mapping...", flush=True)
         plt.tight_layout()
@@ -376,9 +465,6 @@ class ResultsVisualizer:
 
         point_color_np = np.asarray(point_color, dtype=np.float32).reshape(1, 3)
         one_minus_alpha = float(max(0.0, min(1.0, 1.0 - point_alpha)))
-        point_radius = max(1, int(point_radius))
-        kernel_size = 2 * point_radius + 1
-        dilate_kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
 
         try:
             print(f"[gpu_anim] Initializing video writer with codec='{codec}'...", flush=True)
@@ -422,19 +508,11 @@ class ResultsVisualizer:
 
                         ys = (nz // width).cpu().numpy()
                         xs = (nz % width).cpu().numpy()
-                        alpha_vals = alpha_eff.cpu().numpy()
+                        a = alpha_eff.cpu().numpy().reshape(-1, 1)
 
-                        alpha_map = np.zeros((height, width), dtype=np.float32)
-                        alpha_map[ys, xs] = np.maximum(alpha_map[ys, xs], alpha_vals)
-                        if point_radius > 1:
-                            alpha_map = cv2.dilate(alpha_map, dilate_kernel, iterations=1)
-
-                        mask = alpha_map > 0
-                        if np.any(mask):
-                            a = alpha_map[mask].reshape(-1, 1)
-                            base = frame_rgb[mask, :].astype(np.float32)
-                            blended = (1.0 - a) * base + a * point_color_np
-                            frame_rgb[mask, :] = blended.astype(np.uint8)
+                        base = frame_rgb[ys, xs, :].astype(np.float32)
+                        blended = (1.0 - a) * base + a * point_color_np
+                        frame_rgb[ys, xs, :] = blended.astype(np.uint8)
                 else:
                     frame_rgb = background_rgba[:, :, :3].copy()
 
