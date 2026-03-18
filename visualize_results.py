@@ -206,7 +206,7 @@ class ResultsVisualizer:
         n_windows = int(ftle_window_lengths.size)
 
         # Taller canvas to reserve space for a single combined legend below.
-        fig, ax1 = plt.subplots(figsize=(14, 8))
+        fig, ax1 = plt.subplots(figsize=(12, 6))
 
         ax1.plot(plot_epochs, plot_test_loss, color="brown", linewidth=1.2, label="Test Loss")
 
@@ -297,7 +297,8 @@ class ResultsVisualizer:
             fontsize=8,
         )
 
-        ax1.set_title("Test Loss vs. FTLE (Benettin)", fontsize=18)
+        cell_type = getattr(config, "RNN_CELL_TYPE", "lstm").upper()
+        ax1.set_title(f"Test Loss vs. FTLE (Benettin) - {cell_type}", fontsize=18)
         plt.tight_layout()
 
         if save_path:

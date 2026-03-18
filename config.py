@@ -11,13 +11,14 @@ NUM_CLASSES = 1
 
 EMBEDDING_FIX = False
 FC_FIX = False
-PRETRAINED_CHECKPOINT = 'checkpoints/pretrained1.pt'
+PRETRAINED_CHECKPOINT = 'checkpoints/pretrained_gru.pt'
 
 # RNN specific parameters
 HIDDEN_SIZE = 60
-LEARNING_RATE = 0.0001
+LEARNING_RATE = 0.0003
+
 # RNN cell type: 'lstm', 'gru', or 'rnn'
-RNN_CELL_TYPE = 'lstm'
+RNN_CELL_TYPE = 'gru'
 
 # Data split
 TRAIN_RATIO = 0.7

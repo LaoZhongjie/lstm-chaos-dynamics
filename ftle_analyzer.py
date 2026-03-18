@@ -40,9 +40,8 @@ class FTLEBenettinAnalyzer:
         self.clamp_min = float(clamp_min)
         self.cell_type = getattr(model, "cell_type", "lstm").lower()
         
-        # Keep eps as a device scalar to avoid host->device churn in tight loops.
         # Keep eps in float64 for FTLE arithmetic (logs/norm ratios).
-        # Note: the LSTM forward must remain float32/float16; we cast eps to state dtype when perturbing.
+        # Note: the RNN forward must remain float32/float16; we cast eps to state dtype when perturbing.
         self.eps = torch.tensor(float(eps), dtype=torch.float64, device=device)
 
         # Model stores embedding_dim on the instance; keep a robust fallback.
@@ -67,22 +66,26 @@ class FTLEBenettinAnalyzer:
 
         try:
             with torch.inference_mode():
-                # 1) Natural-input segment: map tokens -> final LSTM state (h_T, c_T) (B, H)
-                _, final_hc = self.model.get_hidden_output(sample_tokens)
-                if not (isinstance(final_hc, tuple) and len(final_hc) == 2):
-                    raise TypeError("Expected model.get_hidden_output() to return (output, (h, c)) for an LSTM model.")
+                # 1) Natural-input segment: map tokens -> final recurrent state
+                # LSTM: final_state = (h_T, c_T); GRU/RNN: final_state = h_T
+                _, final_state = self.model.get_hidden_output(sample_tokens)
 
-                h_final, c_final = final_hc  # each: (1, B, H)
-                h = h_final.squeeze(0)
-                c = c_final.squeeze(0)
+                if isinstance(final_state, tuple) and len(final_state) == 2:
+                    h_final, c_final = final_state  # (1,B,H) each
+                    h = h_final.squeeze(0)
+                    c = c_final.squeeze(0)
+                else:
+                    h = final_state.squeeze(0)
+                    c = torch.zeros_like(h)
                 
                 batch_size, hidden_size = h.shape
 
                 # 2) Initialize perturbation direction (unit-norm per sample)
+                state_dim = 2 * hidden_size if self.cell_type == "lstm" else hidden_size
                 if w0 is None:
                     w0 = torch.randn(
                         batch_size,
-                        2 * hidden_size,
+                        state_dim,
                         generator=self._w0_generator,
                         device=self.device,
                         dtype=torch.float64,
@@ -91,19 +94,29 @@ class FTLEBenettinAnalyzer:
                     w0 = w0.to(device=self.device, dtype=torch.float64)
 
                 if w0.ndim != 2 or w0.shape[0] != batch_size:
-                    raise ValueError(f"w0 must have shape [B, 2H] (or [B, H]); got {tuple(w0.shape)}.")
+                    raise ValueError(f"w0 must have shape [B, {state_dim}] (or [B, H]/[B,2H]); got {tuple(w0.shape)}.")
 
-                if w0.shape[1] == hidden_size:
-                    w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
-                elif w0.shape[1] != 2 * hidden_size:
-                    raise ValueError(f"w0 must have shape [B, 2H] (or [B, H]); got {tuple(w0.shape)}.")
+                if self.cell_type == "lstm":
+                    if w0.shape[1] == hidden_size:
+                        w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
+                    elif w0.shape[1] != 2 * hidden_size:
+                        raise ValueError(f"w0 must have shape [B, 2H] (or [B, H]); got {tuple(w0.shape)}.")
+                else:
+                    if w0.shape[1] != hidden_size:
+                        raise ValueError(f"w0 must have shape [B, H] for GRU/RNN; got {tuple(w0.shape)}.")
 
                 # Normalize in float64, then cast direction to state dtype for evolution.
                 w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
                 eps_state = self.eps.to(dtype=h.dtype)
                 w0_state = w0.to(dtype=h.dtype)
-                h_p = h + eps_state * w0_state[:, :hidden_size]
-                c_p = c + eps_state * w0_state[:, hidden_size:]
+                # Initial perturbed state along w0
+                if self.cell_type == "lstm":
+                    h_p = h + eps_state * w0_state[:, :hidden_size]
+                    c_p = c + eps_state * w0_state[:, hidden_size:]
+                else:
+                    # GRU / RNN: only perturb hidden state
+                    h_p = h + eps_state * w0_state
+                    c_p = c
 
                 # 3) Block schedule for the zero-drive segment
                 burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
@@ -146,20 +159,30 @@ class FTLEBenettinAnalyzer:
                     zero_block = zero_full if block_len == self.window_length else zero_rem
                     assert zero_block is not None
 
-                    # Evolve both trajectories in one LSTM call (stacked batch: [base, perturbed]).
+                    # Evolve both trajectories in one recurrent call (stacked batch: [base, perturbed]).
                     h_cat = torch.cat([h, h_p], dim=0).unsqueeze(0)  # (1, 2B, H)
-                    c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)  # (1, 2B, H)
-                    _, (hc_out, cc_out) = self.model.lstm(zero_block, (h_cat, c_cat))
-                    hc_out = hc_out.squeeze(0)
-                    cc_out = cc_out.squeeze(0)
-                    h, h_p = hc_out[:batch_size], hc_out[batch_size:]
-                    c, c_p = cc_out[:batch_size], cc_out[batch_size:]
+                    if self.cell_type == "lstm":
+                        c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)  # (1, 2B, H)
+                        _, (hc_out, cc_out) = self.model.rnn(zero_block, (h_cat, c_cat))
+                        hc_out = hc_out.squeeze(0)
+                        cc_out = cc_out.squeeze(0)
+                        h, h_p = hc_out[:batch_size], hc_out[batch_size:]
+                        c, c_p = cc_out[:batch_size], cc_out[batch_size:]
+                    else:
+                        _, h_out = self.model.rnn(zero_block, h_cat)
+                        h_out = h_out.squeeze(0)
+                        h, h_p = h_out[:batch_size], h_out[batch_size:]
+                        c = torch.zeros_like(h)
+                        c_p = torch.zeros_like(h_p)
 
                     # Separation and log-growth
-                    # Compute FTLE arithmetic in float64 (but keep states in float32 for LSTM).
+                    # Compute FTLE arithmetic in float64 (but keep states in float32 for RNN).
                     dh = (h_p - h).to(torch.float64)
-                    dc = (c_p - c).to(torch.float64)
-                    delta64 = torch.cat([dh, dc], dim=1)  # (B, 2H) float64
+                    if self.cell_type == "lstm":
+                        dc = (c_p - c).to(torch.float64)
+                        delta64 = torch.cat([dh, dc], dim=1)  # (B, 2H)
+                    else:
+                        delta64 = dh  # (B, H)
                     r_t64 = delta64.norm(dim=1).clamp_min(self.clamp_min)  # (B,) float64
 
                     if k >= burn_blocks:
@@ -168,8 +191,13 @@ class FTLEBenettinAnalyzer:
                     # Renormalize perturbed state along current separation direction.
                     dir_vec64 = delta64 / r_t64.unsqueeze(1)  # float64 unit direction
                     dir_vec_state = dir_vec64.to(dtype=h.dtype)
-                    h_p = h + eps_state * dir_vec_state[:, :hidden_size]
-                    c_p = c + eps_state * dir_vec_state[:, hidden_size:]
+                    if self.cell_type == "lstm":
+                        h_p = h + eps_state * dir_vec_state[:, :hidden_size]
+                        c_p = c + eps_state * dir_vec_state[:, hidden_size:]
+                    else:
+                        # GRU / RNN: only hidden state is renormalized
+                        h_p = h + eps_state * dir_vec_state
+                        c_p = c
 
                 ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
                 ftle_mean = float(ftle_per_sample.mean().item())

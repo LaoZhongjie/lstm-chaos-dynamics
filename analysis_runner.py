@@ -10,7 +10,7 @@ import json
 from tqdm import tqdm
 
 import config
-from model import LSTM
+from model import RNN
 from config_saver import save_experiment_config
 from data_loader import IMDBDataLoader
 from asymptotic_analyzer import HiddenStateAnalyzer
@@ -71,7 +71,7 @@ class AnalysisRunner:
         X_train, X_test, y_train, y_test = self.data_loader.load_data()
         _, _, self.test_dataset = self.data_loader.create_data_loaders(X_train, X_test, y_train, y_test)
         
-        self.model = LSTM(
+        self.model = RNN(
             vocab_size=self.data_loader.vocab_size,
             embedding_dim=config.EMBEDDING_DIM,
             hidden_size=config.HIDDEN_SIZE,
@@ -131,7 +131,10 @@ class AnalysisRunner:
         tokens = torch.stack([self.test_dataset[i][0] for i in indices], dim=0).to(self.device)
 
         # Fixed random direction per-sample.
-        w0 = torch.randn(n, 2 * config.HIDDEN_SIZE, generator=w0_generator).to(self.device)
+        # LSTM: state is (h,c) -> 2H; GRU/RNN: state is h -> H.
+        cell_type = getattr(self.model, "cell_type", "lstm").lower()
+        state_dim = 2 * config.HIDDEN_SIZE if cell_type == "lstm" else config.HIDDEN_SIZE
+        w0 = torch.randn(n, state_dim, generator=w0_generator).to(self.device)
         
         self.sample_indices = indices
         self.sample_tokens = tokens

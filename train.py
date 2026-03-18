@@ -1,5 +1,5 @@
 """
-Training script for lstm model with checkpointing for chaos analysis
+Training script for RNN model (LSTM/GRU/simple RNN) with checkpointing for chaos analysis
 """
 
 import os
@@ -12,18 +12,18 @@ import json
 from datetime import datetime
 
 import config
-from model import LSTM
+from model import RNN
 from config_saver import save_experiment_config
 from data_loader import IMDBDataLoader
 from seed_utils import HierarchicalSeedManager
 
 class LSTMTrainer:
-    """Trainer class for lstm model with comprehensive logging"""
+    """Trainer class for RNN model with comprehensive logging"""
     
     def __init__(self, seed_manager=None):
         self.device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
-        print("Training lstm model")
+        print(f"Training RNN model (cell_type={config.RNN_CELL_TYPE})")
         self.seed_manager = seed_manager or HierarchicalSeedManager(config.RANDOM_SEED)
         
         # Create directories
@@ -76,7 +76,7 @@ class LSTMTrainer:
         
         embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
         
-        self.model = LSTM(
+        self.model = RNN(
             vocab_size=vocab_size,
             embedding_dim=config.EMBEDDING_DIM,
             hidden_size=config.HIDDEN_SIZE,
@@ -86,12 +86,13 @@ class LSTMTrainer:
             seed_manager=self.seed_manager,
         ).to(self.device)
         
-        self.optimizer = optim.Adam(
+        # Use vanilla SGD as requested (no Adam, no extra tricks)
+        self.optimizer = optim.SGD(
             self.model.parameters(),
-            lr=config.LEARNING_RATE
+            lr=config.LEARNING_RATE,
         )
         
-        print(f"lstm parameters: {sum(p.numel() for p in self.model.parameters())}")
+        print(f"RNN parameters: {sum(p.numel() for p in self.model.parameters())}")
         
     def train_epoch(self, epoch):
         self.model.train()

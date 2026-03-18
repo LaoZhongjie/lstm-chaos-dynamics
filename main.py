@@ -16,7 +16,7 @@ from visualize_results import ResultsVisualizer
 from seed_utils import HierarchicalSeedManager
 
 print("="*80)
-print("Chaos Analysis Experiment - LSTM")
+print("Chaos Analysis Experiment - RNN (LSTM/GRU/simple RNN)")
 print("="*80)
 print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"Device: {torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')}")
@@ -42,7 +42,7 @@ class ExperimentRunner:
         self.seed_manager.apply_global_seed()
         
     def run_training(self, max_epochs=None):
-        print("\nSTEP 1: TRAINING LSTM MODEL")
+        print("\nSTEP 1: TRAINING RNN MODEL")
         print("-" * 40)
         
         if max_epochs is None:
@@ -53,12 +53,12 @@ class ExperimentRunner:
             vocab_size = trainer.load_data()
             trainer.initialize_model(vocab_size)
             
-            print(f"Starting LSTM training for {max_epochs} epochs...")
+            print(f"Starting RNN training for {max_epochs} epochs (cell_type={config.RNN_CELL_TYPE})...")
             print()
             
             history = trainer.train(max_epochs)
             
-            print(f"✓ LSTM training completed successfully!")
+            print(f"✓ RNN training completed successfully!")
             print(f"✓ Best epoch: {trainer.best_epoch}")
             print(f"✓ Best test loss: {trainer.best_test_loss:.4f}")
             print()

@@ -51,21 +51,21 @@ class RNN(nn.Module):
             _print_param_init("embedding.weight", self.embedding.weight, "uniform_(-0.1, 0.1); padding row set to 0")
         
         if self.cell_type == "lstm":
-            self.lstm = nn.LSTM(
+            self.rnn = nn.LSTM(
                 embedding_dim,
                 hidden_size,
                 batch_first=True,
                 bidirectional=False,
             )
         elif self.cell_type == "gru":
-            self.lstm = nn.GRU(
+            self.rnn = nn.GRU(
                 embedding_dim,
                 hidden_size,
                 batch_first=True,
                 bidirectional=False,
             )
         elif self.cell_type == "rnn":
-            self.lstm = nn.RNN(
+            self.rnn = nn.RNN(
                 embedding_dim,
                 hidden_size,
                 nonlinearity="tanh",
@@ -86,50 +86,13 @@ class RNN(nn.Module):
                 nn.init.xavier_uniform_(self.fc.weight)
             nn.init.zeros_(self.fc.bias)
             _print_param_init("fc.weight", self.fc.weight, "xavier_uniform_")
-            _print_param_init("fc.bias", self.fc.bias, "zeros_")
 
-    
+        # self._init_recurrent_weights()
+        
     def _init_recurrent_weights(self):
-        if self.cell_type != "lstm":
-            for name, param in self.lstm.named_parameters():
-                if 'weight_hh' in name or 'weight_ih' in name or 'bias' in name:
-                    param.data.zero_()
-                    _print_param_init(f"rnn.{name}", param, "zeros_()")
-                    
-        # for name, param in self.lstm.named_parameters():
-        #     if 'weight_hh' in name:
-        #         hidden_size = param.shape[1]
-        #         for i in range(4):
-        #             gate_weight = param.data[i * hidden_size:(i + 1) * hidden_size]
-        #             with self.seed_manager.local_seed(f"model.init.lstm.{name}.gate_{i}"):
-        #                 nn.init.orthogonal_(gate_weight)
-        #         param.data *= 0.2
-
-        #     elif 'weight_ih' in name:
-        #         with self.seed_manager.local_seed(f"model.init.lstm.{name}"):
-        #             nn.init.normal_(param, mean=0.0, std=1e-2)
-
-        #     elif 'bias' in name:
-        #         param.data.zero_()
-        #         n = param.size(0)
-        #         # forget gate bias
-        #         param.data[n//4:n//2].fill_(-1.0)
-        else:
-            for name, param in self.lstm.named_parameters():
-                if 'weight_hh' in name:
-                    param.data.zero_()
-                    _print_param_init(f"lstm.{name}", param, "zeros_()")
-
-                elif 'weight_ih' in name:
-                    param.data.zero_()
-                    _print_param_init(f"lstm.{name}", param, "zeros_()")
-
-                elif 'bias' in name:
-                    param.data.zero_()
-                    n = param.size(0)
-                    # forget gate bias
-                    param.data[n//4:n//2].fill_(-1.0)
-                    _print_param_init(f"lstm.{name}", param, "zeros_(); forget gate bias set to -1.0")
+        for name, param in self.rnn.named_parameters():
+            if 'weight_hh' in name or 'weight_ih' in name or 'bias' in name:
+                param.data.zero_()
     
     def forward(self, x, lengths, hidden=None):
         batch_size = x.size(0)
@@ -139,11 +102,11 @@ class RNN(nn.Module):
         if hidden is None:
             hidden = self.init_hidden(batch_size)
         
-        lstm_out, hidden = self.lstm(embedded, hidden)
+        rnn_out, hidden = self.rnn(embedded, hidden)
         
         # Use last true output for classification
         idx = (lengths - 1).clamp(min=0)
-        last_output = lstm_out[torch.arange(batch_size, device=x.device), idx, :]
+        last_output = rnn_out[torch.arange(batch_size, device=x.device), idx, :]
         
         output = self.fc(last_output)
         
@@ -172,7 +135,7 @@ class RNN(nn.Module):
             hidden = self.init_hidden(batch_size)
         
         # recurrent forward pass
-        h_t, final_state = self.lstm(embedded, hidden)
+        h_t, final_state = self.rnn(embedded, hidden)
 
         # 为了兼容 FTLE 代码，对外始终返回 (h_t, (h_final, c_final))
         if self.cell_type == "lstm":
@@ -200,5 +163,5 @@ class RNN(nn.Module):
         zero_input = torch.zeros(batch_size, timesteps, input_dim, device=device)
 
         # Continue recurrent iteration
-        hidden_states, _ = self.lstm(zero_input, h_init)
+        hidden_states, _ = self.rnn(zero_input, h_init)
         return hidden_states
