@@ -88,10 +88,15 @@ class ResultsVisualizer:
         print("[load_results] Loaded h5 data.", flush=True)
         return True
     
-    def plot_training_curves(self, save_path=None, max_epoch: Optional[int] = None):
+    def plot_training_curves(
+        self,
+        save_path=None,
+        max_epoch: Optional[int] = None,
+        start_epoch: Optional[int] = None,
+    ):
         print("Generating training_curves plot...")
         
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
         
         epochs = np.asarray(self.results.get('epochs', []))
         test_loss = np.asarray(self.results.get('test_loss', []), dtype=np.float32)
@@ -104,8 +109,15 @@ class ResultsVisualizer:
         epoch_upper = int(np.max(epochs))
         if max_epoch is not None:
             epoch_upper = min(epoch_upper, int(max_epoch))
-        epoch_mask = epochs <= epoch_upper
+
+        epoch_lower = int(np.min(epochs)) if start_epoch is None else int(start_epoch)
+        if epoch_upper < epoch_lower:
+            raise ValueError(f"Invalid epoch range: start_epoch={epoch_lower} > max_epoch={epoch_upper}.")
+
+        epoch_mask = (epochs >= epoch_lower) & (epochs <= epoch_upper)
         plot_epochs = epochs[epoch_mask]
+        if plot_epochs.size == 0:
+            raise ValueError(f"No training-curve points available in [{epoch_lower}, {epoch_upper}].")
         plot_test_loss = test_loss[epoch_mask]
         plot_train_loss = train_loss[epoch_mask]
         plot_test_accuracy = test_accuracy[epoch_mask] if test_accuracy.size > 0 else test_accuracy
@@ -113,7 +125,8 @@ class ResultsVisualizer:
         
         # Plot 1: Loss curves
         ax1.plot(plot_epochs, plot_train_loss, color='blue', linewidth=1, label='Train Loss', alpha=0.7)
-        ax1.plot(plot_epochs, plot_test_loss, color='brown', linewidth=1, label='Test Loss')
+        lr = getattr(config, "LEARNING_RATE", None)
+        ax1.plot(plot_epochs, plot_test_loss, color='brown', linewidth=1, label=f"Test Loss (lr={lr})")
         
         # Mark global optimum
         min_loss_idx = np.argmin(plot_test_loss)
@@ -127,7 +140,7 @@ class ResultsVisualizer:
         ax1.set_ylabel('Loss', fontsize=16)
         ax1.set_title('Training Curves - Loss', fontsize=20)
         ax1.grid(True, alpha=0.3)
-        ax1.legend()
+        ax1.legend(loc="best", framealpha=0.9)
         
         # Plot 2: Accuracy curves
         if plot_test_accuracy.size > 0 and plot_train_accuracy.size > 0:
@@ -139,7 +152,7 @@ class ResultsVisualizer:
             ax2.set_ylabel('Accuracy (%)', fontsize=16)
             ax2.set_title('Training Curves - Accuracy', fontsize=20)
             ax2.grid(True, alpha=0.3)
-            ax2.legend()
+            ax2.legend(loc="best", framealpha=0.9)
         else:
             ax2.text(0.5, 0.5, 'Test accuracy data not available', 
                     transform=ax2.transAxes, ha='center', va='center')
@@ -152,7 +165,13 @@ class ResultsVisualizer:
         
         plt.show()
     
-    def plot_test_loss_with_ftle(self, *, save_path: Optional[str] = None, max_epoch: Optional[int] = None) -> None:
+    def plot_test_loss_with_ftle(
+        self,
+        *,
+        save_path: Optional[str] = None,
+        max_epoch: Optional[int] = None,
+        start_epoch: Optional[int] = None,
+    ) -> None:
         print("Generating test_loss_with_ftle plot...")
         epochs = np.asarray(self.results.get("epochs", []))
         test_loss = np.asarray(self.results.get("test_loss", []), dtype=np.float32)
@@ -160,12 +179,14 @@ class ResultsVisualizer:
         ftle_window_lengths = np.asarray(self.results.get("ftle_window_lengths", []), dtype=np.int32)
         ftle_mean_by_window = np.asarray(self.results.get("ftle_mean_by_window", []), dtype=np.float32)
         ftle_eps_values = np.asarray(self.results.get("ftle_eps_values", []), dtype=np.float64)
+        
         if epochs.size == 0 or test_loss.size == 0:
             raise ValueError("Missing epochs/test_loss data for plotting.")
         if analyzed_epochs.size == 0:
             raise ValueError("Missing analyzed_epochs data for plotting.")
         if ftle_window_lengths.size == 0:
             raise ValueError("Missing ftle_window_lengths data for plotting.")
+        
         # Support 2D [epochs, windows] (legacy, single eps) or 3D [epochs, n_eps, n_windows]
         if ftle_mean_by_window.ndim == 2:
             ftle_eps_values = np.array([1e-3])  # legacy default
@@ -187,28 +208,34 @@ class ResultsVisualizer:
         epoch_upper = int(np.max(analyzed_epochs))
         if max_epoch is not None:
             epoch_upper = min(epoch_upper, int(max_epoch))
-        epoch_mask = epochs <= epoch_upper
+
+        epoch_lower = int(np.min(analyzed_epochs)) if start_epoch is None else int(start_epoch)
+        if epoch_upper < epoch_lower:
+            raise ValueError(f"Invalid epoch range: start_epoch={epoch_lower} > max_epoch={epoch_upper}.")
+
+        epoch_mask = (epochs >= epoch_lower) & (epochs <= epoch_upper)
         plot_epochs = epochs[epoch_mask]
         plot_test_loss = test_loss[epoch_mask]
         if plot_epochs.size == 0:
-            raise ValueError(f"No test-loss points available up to analyzed epoch {epoch_upper}.")
+            raise ValueError(f"No test-loss points available in [{epoch_lower}, {epoch_upper}].")
 
         valid_ftle_len = min(analyzed_epochs.size, ftle_mean_by_window.shape[0])
         aligned_analyzed_epochs = analyzed_epochs[:valid_ftle_len]
         aligned_ftle_mean_by_window = ftle_mean_by_window[:valid_ftle_len, :, :]
-        analyzed_mask = aligned_analyzed_epochs <= epoch_upper
+
+        analyzed_mask = (aligned_analyzed_epochs >= epoch_lower) & (aligned_analyzed_epochs <= epoch_upper)
         plot_analyzed_epochs = aligned_analyzed_epochs[analyzed_mask]
         plot_ftle_mean_by_window = aligned_ftle_mean_by_window[analyzed_mask, :, :]
         if plot_analyzed_epochs.size == 0:
-            raise ValueError(f"No FTLE points available up to analyzed epoch {epoch_upper}.")
+            raise ValueError(f"No FTLE points available in [{epoch_lower}, {epoch_upper}].")
 
         n_eps = int(ftle_eps_values.size)
         n_windows = int(ftle_window_lengths.size)
 
-        # Taller canvas to reserve space for a single combined legend below.
         fig, ax1 = plt.subplots(figsize=(12, 6))
 
-        ax1.plot(plot_epochs, plot_test_loss, color="brown", linewidth=1.2, label="Test Loss")
+        lr = getattr(config, "LEARNING_RATE", None)
+        ax1.plot(plot_epochs, plot_test_loss, color="brown", linewidth=1.2, label=f"Test Loss (lr={lr})")
 
         min_loss_idx = np.argmin(plot_test_loss)
         global_opt_epoch = plot_epochs[min_loss_idx]
@@ -221,7 +248,7 @@ class ResultsVisualizer:
         ax1.set_ylabel("Test Loss", color="brown", fontsize=16)
         ax1.tick_params(axis="y", labelcolor="brown")
         ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(0, epoch_upper)
+        ax1.set_xlim(epoch_lower, epoch_upper)
 
         ax2 = ax1.twinx()
         # Styling rule:
@@ -273,29 +300,12 @@ class ResultsVisualizer:
                     shade = float(window_shades[w_idx % len(window_shades)])
                     color = tuple(np.clip(base * shade, 0.0, 1.0).tolist()) + (1.0,)
                 ftle_handles.append(Line2D([0], [0], color=color, lw=2.0, linestyle='-'))
-                ftle_labels.append(f"eps={eps_val:.0e}, w={int(window_length)}")
+                ftle_labels.append(f"FTLE(eps = {eps_val:.0e}, w={int(window_length)})")
 
         handles = main_handles + ftle_handles
         labels = main_labels + ftle_labels
 
-        # Reserve space for legend below the axes.
-        # Layout: at most 7 columns per row; unlimited rows.
-        n_items = len(labels)
-        legend_ncol = min(7, max(1, n_items))
-        n_rows = int(np.ceil(n_items / legend_ncol))
-        # Dynamic bottom margin so legend doesn't sit too far from xlabel or get clipped.
-        bottom = 0.14 + 0.045 * max(0, n_rows - 1)
-        bottom = float(min(0.60, bottom))
-        fig.subplots_adjust(bottom=bottom)
-        ax1.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.08),
-            ncol=legend_ncol,
-            framealpha=0.9,
-            fontsize=8,
-        )
+        ax1.legend(handles, labels, loc="best", framealpha=0.9, fontsize=8)
 
         cell_type = getattr(config, "RNN_CELL_TYPE", "lstm").upper()
         ax1.set_title(f"Test Loss vs. FTLE (Benettin) - {cell_type}", fontsize=18)
@@ -313,6 +323,7 @@ class ResultsVisualizer:
         video_path: str,
         subsample_epochs: int = 1,
         subsample_samples: int = 100,
+        start_epoch: Optional[int] = None,
         max_epoch: Optional[int] = None,
         fps: int = 20,
         dpi: int = 100,
@@ -356,18 +367,19 @@ class ResultsVisualizer:
         epoch_upper = int(np.max(analyzed_epochs))
         if max_epoch is not None:
             epoch_upper = min(epoch_upper, int(max_epoch))
-        if epoch_upper < int(np.min(analyzed_epochs)):
-            raise ValueError(f"No analyzed epochs available up to {epoch_upper}.")
+        epoch_lower = int(np.min(analyzed_epochs)) if start_epoch is None else int(start_epoch)
+        if epoch_upper < epoch_lower:
+            raise ValueError(f"Invalid epoch range: start_epoch={epoch_lower} > max_epoch={epoch_upper}.")
 
-        loss_mask = epochs <= epoch_upper
+        loss_mask = (epochs >= epoch_lower) & (epochs <= epoch_upper)
         plot_epochs = epochs[loss_mask]
         plot_test_loss = test_loss[loss_mask]
         if plot_epochs.size == 0:
-            raise ValueError(f"No test-loss points available up to analyzed epoch {epoch_upper}.")
-        analyzed_mask = analyzed_epochs <= epoch_upper
+            raise ValueError(f"No test-loss points available in [{epoch_lower}, {epoch_upper}].")
+        analyzed_mask = (analyzed_epochs >= epoch_lower) & (analyzed_epochs <= epoch_upper)
         available_epoch_indices = np.nonzero(analyzed_mask)[0]
         if available_epoch_indices.size == 0:
-            raise ValueError(f"No analyzed epochs available up to analyzed epoch {epoch_upper}.")
+            raise ValueError(f"No analyzed epochs available in [{epoch_lower}, {epoch_upper}].")
 
         bifurcation_data = self.results.get('bifurcation_data', None)
         use_h5 = bifurcation_data is None and self.h5_path and os.path.exists(self.h5_path)
@@ -486,7 +498,7 @@ class ResultsVisualizer:
         ax.set_title('Test Loss + Bifurcation Map', fontsize=20)
         ax.grid(True, alpha=0.3)
 
-        ax_twin.scatter([], [], s=0.3, alpha=point_alpha, color=np.array(point_color) / 255.0, label='Bifurcation Map')
+        ax_twin.scatter([], [], s=1, alpha=point_alpha, color=np.array(point_color) / 255.0, label='1D Hidden State')
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax_twin.get_legend_handles_labels()
         ax.legend(lines1 + lines2, labels1 + labels2, loc="best",framealpha=0.5)

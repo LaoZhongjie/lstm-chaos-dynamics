@@ -37,6 +37,8 @@ class LSTMTrainer:
         self.optimizer = None
         # Model returns raw logits (no sigmoid), so use numerically-stable BCE-with-logits.
         self.criterion = nn.BCEWithLogitsLoss()
+        self.embedding_fix = config.EMBEDDING_FIX
+        self.fc_fix = config.FC_FIX
         
         # Training history
         self.training_history = {
@@ -60,11 +62,11 @@ class LSTMTrainer:
         embedding_weights = None
         fc_weights = None
         
-        if config.EMBEDDING_FIX:
+        if self.embedding_fix:
             embedding_weights = state_dict['embedding.weight'].cpu().numpy()
             print(f"[init model]Extracted embedding weights: shape {embedding_weights.shape}")
             
-        if config.FC_FIX:
+        if self.fc_fix:
             fc_weight = state_dict['fc.weight'].cpu().numpy()
             fc_bias = state_dict['fc.bias'].cpu().numpy()
             fc_weights = (fc_weight, fc_bias)
@@ -74,7 +76,11 @@ class LSTMTrainer:
 
     def initialize_model(self, vocab_size, pretrained_checkpoint=config.PRETRAINED_CHECKPOINT):
         
-        embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
+        if self.embedding_fix or self.fc_fix:
+            embedding_weights, fc_weights = self.load_weights_from_checkpoint(pretrained_checkpoint)
+        else:
+            embedding_weights = None
+            fc_weights = None
         
         self.model = RNN(
             vocab_size=vocab_size,
@@ -86,8 +92,7 @@ class LSTMTrainer:
             seed_manager=self.seed_manager,
         ).to(self.device)
         
-        # Use vanilla SGD as requested (no Adam, no extra tricks)
-        self.optimizer = optim.SGD(
+        self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config.LEARNING_RATE,
         )

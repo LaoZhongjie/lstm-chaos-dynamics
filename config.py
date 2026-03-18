@@ -14,7 +14,7 @@ FC_FIX = False
 PRETRAINED_CHECKPOINT = 'checkpoints/pretrained_gru.pt'
 
 # RNN specific parameters
-HIDDEN_SIZE = 60
+HIDDEN_SIZE = 100
 LEARNING_RATE = 0.0003
 
 # RNN cell type: 'lstm', 'gru', or 'rnn'
@@ -35,8 +35,8 @@ MACHINE_PRECISION_THRESHOLD = -15
 # - burn_in: skip the first N zero-drive steps when accumulating the exponent
 # FTLE_EPS = [1e-6, 3e-6, 5e-6, 8e-6, 1e-5, 3e-5, 5e-5]
 # FTLE_WINDOW_LENGTHS = [3, 5, 7, 10, 13, 15]
-FTLE_EPS = [1e-5]
-FTLE_WINDOW_LENGTHS = [5]
+FTLE_EPS = [1e-6]
+FTLE_WINDOW_LENGTHS = [10]
 FTLE_BURN_IN = 200
 
 # Device and reproducibility

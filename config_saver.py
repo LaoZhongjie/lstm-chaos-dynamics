@@ -36,6 +36,7 @@ def collect_experiment_config(extra=None):
     out = {
         "timestamp": datetime.now().isoformat(),
         "hyperparameters": {},
+        "model_architecture": {},
         "model_init": {},
         "paths": {},
     }
@@ -53,6 +54,12 @@ def collect_experiment_config(extra=None):
             pass
 
     # Model initialization (derived from config and code logic)
+    cell_type = getattr(config, "RNN_CELL_TYPE", "lstm")
+    out["model_architecture"] = {
+        "cell_type": _serialize_value(cell_type),
+        "module": f"torch.nn.{str(cell_type).upper()}",
+        "notes": "Recurrent cell chosen via config.RNN_CELL_TYPE.",
+    }
     out["model_init"] = {
         "embedding": (
             f"loaded from checkpoint ({config.PRETRAINED_CHECKPOINT}), requires_grad=False"
@@ -64,10 +71,10 @@ def collect_experiment_config(extra=None):
             if config.FC_FIX
             else "xavier_uniform_ (weight), zeros_ (bias)"
         ),
-        "lstm": {
-            "weight_ih": "zeros_()",
-            "weight_hh": "zeros_()",
-            "bias": "zeros_(); forget gate bias (n//4:n//2) = 1.0",
+        "recurrent": {
+            "cell_type": _serialize_value(cell_type),
+            "weight_init": "PyTorch default (nn.<cell> parameters are left as constructed)",
+            "bias_init": "PyTorch default",
         },
     }
 

@@ -114,7 +114,7 @@ class ExperimentRunner:
             print(f"✗ Chaos analysis failed: {str(e)}")
             return False
     
-    def run_visualization(self, visualization_epochs=config.MAX_EPOCHS):
+    def run_visualization(self, visualization_epochs=config.MAX_EPOCHS, start_epoch: int = 1):
         print("STEP 3: GENERATING VISUALIZATIONS")
         print("-" * 40)
 
@@ -130,12 +130,21 @@ class ExperimentRunner:
         test_loss_ftle_path = os.path.join(figures_dir, 'test_loss_with_ftle.png')
         combined_anim_gpu_path = os.path.join(figures_dir, 'combined_bifurcation_animation_gpu.mov')
 
-        visualizer.plot_training_curves(save_path=training_curves_path, max_epoch=visualization_epochs)
-        visualizer.plot_test_loss_with_ftle(save_path=test_loss_ftle_path, max_epoch=visualization_epochs)
+        visualizer.plot_training_curves(
+            save_path=training_curves_path,
+            max_epoch=visualization_epochs,
+            start_epoch=start_epoch,
+        )
+        visualizer.plot_test_loss_with_ftle(
+            save_path=test_loss_ftle_path,
+            max_epoch=visualization_epochs,
+            start_epoch=start_epoch,
+        )
         visualizer.plot_test_loss_bifurcation_animation_gpu(
             video_path=combined_anim_gpu_path,
             subsample_epochs=1,
             subsample_samples=config.NUM_TEST_SAMPLES,
+            start_epoch=start_epoch,
             max_epoch=visualization_epochs,
         )
 
@@ -169,7 +178,7 @@ def main():
     parser.add_argument('--epochs_to_check', type=str, default=None,
                        help='Comma-separated explicit epochs to analyze, e.g. "11,50,100,300,600,900"')
     parser.add_argument('--epoch_range', type=str, default=None,
-                       help='Epoch range to analyze (inclusive), e.g. "600-1000"')
+                       help='Epoch range (inclusive) for chaos analysis and visualization, e.g. "600-1000"')
     parser.add_argument('--analysis_interval', type=int, default=1,
                        help='Stride for range-based analysis (default 1)')
     parser.add_argument('-ve', type=int, default=config.MAX_EPOCHS,
@@ -193,6 +202,25 @@ def main():
         args.ae = 20
         print("QUICK TEST MODE: Reduced epochs for fast testing")
         print()
+
+    # Support epoch range for both analysis and visualization.
+    analysis_start_epoch = 1
+    analysis_end_epoch = args.ae
+    viz_start_epoch = 1
+    viz_end_epoch = args.ve
+    if args.epoch_range:
+        s = args.epoch_range.strip()
+        sep = "-" if "-" in s else (":" if ":" in s else None)
+        if sep is None:
+            parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
+        try:
+            a, b = s.split(sep, 1)
+            analysis_start_epoch = int(a.strip())
+            analysis_end_epoch = int(b.strip())
+            viz_start_epoch = analysis_start_epoch
+            viz_end_epoch = analysis_end_epoch
+        except Exception:
+            parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
     
     runner = ExperimentRunner()
     
@@ -208,24 +236,13 @@ def main():
     # Step 2: Chaos Analysis
     if not args.sa:
         epochs_to_check = None
-        start_epoch = 1
-        end_epoch = args.ae
+        start_epoch = analysis_start_epoch
+        end_epoch = analysis_end_epoch
         if args.epochs_to_check:
             try:
                 epochs_to_check = [int(x.strip()) for x in args.epochs_to_check.split(",") if x.strip()]
             except Exception:
                 parser.error('--epochs_to_check must be a comma-separated list of integers, e.g. "11,50,100"')
-        if args.epoch_range:
-            s = args.epoch_range.strip()
-            sep = "-" if "-" in s else (":" if ":" in s else None)
-            if sep is None:
-                parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
-            try:
-                a, b = s.split(sep, 1)
-                start_epoch = int(a.strip())
-                end_epoch = int(b.strip())
-            except Exception:
-                parser.error('--epoch_range must look like "600-1000" (or "600:1000")')
 
         success = success and runner.run_chaos_analysis(
             max_analysis_epochs=args.ae,
@@ -240,7 +257,7 @@ def main():
     
     # Step 3: Visualization
     if not args.sv:
-        success = success and runner.run_visualization(args.ve)
+        success = success and runner.run_visualization(viz_end_epoch, start_epoch=viz_start_epoch)
     
     # Print summary
     runner.print_summary()

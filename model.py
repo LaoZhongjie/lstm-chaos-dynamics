@@ -4,29 +4,11 @@ import torch.nn.functional as F
 import config
 from seed_utils import HierarchicalSeedManager
 
-
-def _summarize_tensor_values(t: torch.Tensor, max_elems: int = 32) -> str:
-    with torch.no_grad():
-        tt = t.detach().flatten().cpu()
-        n = int(tt.numel())
-        if n == 0:
-            return "empty"
-        stats = (
-            f"min={tt.min().item():.6g}, max={tt.max().item():.6g}, "
-            f"mean={tt.mean().item():.6g}, std={tt.std(unbiased=False).item():.6g}"
-        )
-        k = min(max_elems, n)
-        sample = ", ".join(f"{v:.6g}" for v in tt[:k].tolist())
-        suffix = "" if k == n else f", ... (+{n - k} more)"
-        return f"{stats}; sample[{k}]={sample}{suffix}"
-
-
 def _print_param_init(param_name: str, param: torch.Tensor, init_desc: str) -> None:
     req = bool(getattr(param, "requires_grad", False))
     print(
         f"[init model]{param_name}: {init_desc} | "
         f"shape={tuple(param.shape)}, dtype={param.dtype}, requires_grad={req} | "
-        f"{_summarize_tensor_values(param)}"
     )
 
 class RNN(nn.Module):
