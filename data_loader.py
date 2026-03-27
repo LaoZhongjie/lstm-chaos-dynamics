@@ -24,24 +24,17 @@ class IMDBDataset(Dataset):
         self.labels = labels
         self.vocab = vocab
         self.sequence_length = sequence_length
+        # Pre-tokenize and numericalize once to avoid expensive regex/split in __getitem__.
+        self.indexed_sequences, self.lengths = self._build_index_cache()
         
     def __len__(self):
         return len(self.texts)
     
     def __getitem__(self, idx):
-        text = self.texts[idx]
+        indices = self.indexed_sequences[idx]
         label = self.labels[idx]
-        
-        # Convert text to indices
-        indices = self.text_to_indices(text)
-        length = min(len(indices), self.sequence_length)
-        
-        # Pad or truncate to fixed length
-        if len(indices) > self.sequence_length:
-            indices = indices[:self.sequence_length]
-        else:
-            indices = indices + [0] * (self.sequence_length - len(indices))
-            
+        length = self.lengths[idx]
+
         return (
             torch.tensor(indices, dtype=torch.long),
             torch.tensor(label, dtype=torch.float),
@@ -64,6 +57,21 @@ class IMDBDataset(Dataset):
                 indices.append(self.vocab['<UNK>'])  # Unknown token
         
         return indices
+
+    def _build_index_cache(self):
+        """Convert all texts to fixed-length index sequences once during dataset construction."""
+        indexed_sequences = []
+        lengths = []
+        for text in tqdm(self.texts, desc="Caching token indices"):
+            indices = self.text_to_indices(text)
+            length = min(len(indices), self.sequence_length)
+            if len(indices) > self.sequence_length:
+                indices = indices[:self.sequence_length]
+            else:
+                indices = indices + [0] * (self.sequence_length - len(indices))
+            indexed_sequences.append(indices)
+            lengths.append(length)
+        return indexed_sequences, lengths
 
 class IMDBDataLoader:
     """Data loader for IMDB dataset with preprocessing"""

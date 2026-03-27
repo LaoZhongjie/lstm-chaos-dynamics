@@ -56,6 +56,8 @@ class ResultsVisualizer:
             'ftle_eps_values',
             'ftle_window_lengths',
             'ftle_mean_by_window',
+            'ftle_mean_autonomous_by_window',
+            'ftle_mean_driven_by_window',
         }
         def _load_h5(path):
             if not os.path.exists(path):
@@ -179,14 +181,14 @@ class ResultsVisualizer:
         ftle_window_lengths = np.asarray(self.results.get("ftle_window_lengths", []), dtype=np.int32)
         ftle_mean_by_window = np.asarray(self.results.get("ftle_mean_by_window", []), dtype=np.float32)
         ftle_eps_values = np.asarray(self.results.get("ftle_eps_values", []), dtype=np.float64)
-        
+
         if epochs.size == 0 or test_loss.size == 0:
             raise ValueError("Missing epochs/test_loss data for plotting.")
         if analyzed_epochs.size == 0:
             raise ValueError("Missing analyzed_epochs data for plotting.")
         if ftle_window_lengths.size == 0:
             raise ValueError("Missing ftle_window_lengths data for plotting.")
-        
+
         # Support 2D [epochs, windows] (legacy, single eps) or 3D [epochs, n_eps, n_windows]
         if ftle_mean_by_window.ndim == 2:
             ftle_eps_values = np.array([1e-3])  # legacy default
@@ -232,6 +234,12 @@ class ResultsVisualizer:
         n_eps = int(ftle_eps_values.size)
         n_windows = int(ftle_window_lengths.size)
 
+        # FTLE type colors and labels
+        FTLE_TYPE_STYLE = {
+            "0_input": {"color": "#2ca02c", "label": "FTLE 0-input", "desc": "shared random init, seq then zero input"},
+        }
+        window_shades = [1.00, 0.78, 0.60, 0.45]
+
         fig, ax1 = plt.subplots(figsize=(12, 6))
 
         lr = getattr(config, "LEARNING_RATE", None)
@@ -243,7 +251,6 @@ class ResultsVisualizer:
                 label=f"Global Optimum (Epoch {global_opt_epoch})")
 
         seed = getattr(config, "RANDOM_SEED", None)
-        lr = getattr(config, "LEARNING_RATE", None)
         ax1.set_xlabel(f"Epochs (seed={seed}, lr={lr})", fontsize=16)
         ax1.set_ylabel("Test Loss", color="brown", fontsize=16)
         ax1.tick_params(axis="y", labelcolor="brown")
@@ -251,61 +258,74 @@ class ResultsVisualizer:
         ax1.set_xlim(epoch_lower, epoch_upper)
 
         ax2 = ax1.twinx()
-        # Styling rule:
-        # - If multiple eps: color by eps, linestyle by window_length
-        # - If single eps:  color by window_length (requested), linestyle by window_length
-        eps_palette = ["#008000", "#0072B2", "#E60000", "#D55E00", "#7570B3",
-                       "#E7298A", "#66A61E", "#1B9E77"]
-        window_palette = ["#008000", "#0072B2", "#E60000", "#D55E00", "#7570B3",
-                          "#E7298A", "#66A61E", "#1B9E77", "#000000", "#56B4E9",
-                          "#CC79A7", "#1B9E77"]
-        # User preference: use a single line style everywhere (solid).
-        # Window distinction (when n_eps > 1) is handled via color shade.
-        window_shades = [1.00, 0.78, 0.60, 0.45]
-        for eps_idx, eps_val in enumerate(ftle_eps_values.tolist()):
-            for w_idx, window_length in enumerate(ftle_window_lengths.tolist()):
-                if n_eps == 1:
-                    color = mcolors.to_rgba(window_palette[w_idx % len(window_palette)])
-                else:
-                    base = np.array(mcolors.to_rgb(eps_palette[eps_idx % len(eps_palette)]), dtype=np.float32)
-                    shade = float(window_shades[w_idx % len(window_shades)])
-                    color = tuple(np.clip(base * shade, 0.0, 1.0).tolist()) + (1.0,)
-                ax2.plot(
-                    plot_analyzed_epochs,
-                    plot_ftle_mean_by_window[:, eps_idx, w_idx],
-                    color=color,
-                    # marker='.',
-                    linestyle='-',
-                    linewidth=1.0,
-                )
+
+        ftle_handles = []
+        ftle_labels = []
+
+        def _plot_ftle(data, style):
+            base_color = style["color"]
+            first_legend = True
+            for eps_idx, eps_val in enumerate(ftle_eps_values.tolist()):
+                for w_idx, window_length in enumerate(ftle_window_lengths.tolist()):
+                    if n_eps > 1:
+                        shade = float(window_shades[w_idx % len(window_shades)])
+                        rgb = np.array(mcolors.to_rgb(base_color), dtype=np.float32)
+                        color = tuple(np.clip(rgb * shade, 0.0, 1.0).tolist()) + (1.0,)
+                    else:
+                        color = mcolors.to_rgba(base_color)
+                    ax2.plot(
+                        plot_analyzed_epochs,
+                        data[:, eps_idx, w_idx],
+                        color=color,
+                        linestyle='-',
+                        linewidth=1.0,
+                    )
+                    if first_legend:
+                        ftle_handles.append(Line2D([0], [0], color=color, lw=2.0, linestyle='-'))
+                        ftle_labels.append(style["label"])
+                        first_legend = False
+
+        _plot_ftle(plot_ftle_mean_by_window, FTLE_TYPE_STYLE["0_input"])
+
         ax2.set_ylabel("FTLE", color="black", fontsize=16)
         ax2.tick_params(axis="y", labelcolor="black")
         ax2.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
 
-        ymin, ymax = ax2.get_ylim()
+        # Auto-scale FTLE axis from plotted data (with padding for readability).
+        ftle_values = plot_ftle_mean_by_window.astype(np.float64, copy=False).reshape(-1)
+        ftle_values = ftle_values[np.isfinite(ftle_values)]
+        
+        if ftle_values.size == 0:
+            ymin, ymax = -0.02, 0.02
+        else:
+            ymin = float(np.min(ftle_values))
+            ymax = float(np.max(ftle_values))
+
+            # Ensure 0 is always included because we draw shaded spans around it.
+            ymax = max(ymax, 0.0)
+            ymin = min(ymin, 0.0)
+
+            if np.isclose(ymin, ymax):
+                pad = 1e-3 if ymin == 0.0 else abs(ymin) * 0.1
+            else:
+                pad = 0.05 * (ymax - ymin)
+
+            ymin -= pad
+            ymax += pad
+        # ymin, ymax = -0.02, 0.02
         ax2.set_ylim(ymin, ymax)
-        ax2.axhspan(0, ymax, alpha=0.05, color="red")   # FTLE > 0
-        ax2.axhspan(ymin, 0, alpha=0.05, color="blue")  # FTLE < 0
+        ax2.axhspan(0, ymax, alpha=0.05, color="red")
+        ax2.axhspan(ymin, 0, alpha=0.05, color="blue")
 
-        # Single combined legend (all entries) placed in the white area below.
+        # Legend: main + FTLE entries + eps,w (once)
         main_handles, main_labels = ax1.get_legend_handles_labels()
-        ftle_handles = []
-        ftle_labels = []
-        for eps_idx, eps_val in enumerate(ftle_eps_values.tolist()):
-            for w_idx, window_length in enumerate(ftle_window_lengths.tolist()):
-                if n_eps == 1:
-                    color = mcolors.to_rgba(window_palette[w_idx % len(window_palette)])
-                else:
-                    base = np.array(mcolors.to_rgb(eps_palette[eps_idx % len(eps_palette)]), dtype=np.float32)
-                    shade = float(window_shades[w_idx % len(window_shades)])
-                    color = tuple(np.clip(base * shade, 0.0, 1.0).tolist()) + (1.0,)
-                ftle_handles.append(Line2D([0], [0], color=color, lw=2.0, linestyle='-'))
-                ftle_labels.append(f"FTLE(eps = {eps_val:.0e}, w={int(window_length)})")
+        eps_str = ",".join(f"{e:.0e}" for e in ftle_eps_values.tolist())
+        w_str = ",".join(str(int(w)) for w in ftle_window_lengths.tolist())
+        param_handle = Line2D([0], [0], color="none", lw=0, label=f"eps={eps_str}, w={w_str}")
+        handles = main_handles + ftle_handles + [param_handle]
+        labels = main_labels + ftle_labels + [param_handle.get_label()]
 
-        handles = main_handles + ftle_handles
-        labels = main_labels + ftle_labels
-
-        ax1.legend(handles, labels, loc="best", framealpha=0.9, fontsize=8)
+        ax1.legend(handles, labels, loc="lower right", framealpha=0.9, fontsize=8)
 
         cell_type = getattr(config, "RNN_CELL_TYPE", "lstm").upper()
         ax1.set_title(f"Test Loss vs. FTLE (Benettin) - {cell_type}", fontsize=18)
@@ -498,7 +518,7 @@ class ResultsVisualizer:
         ax.set_title('Test Loss + Bifurcation Map', fontsize=20)
         ax.grid(True, alpha=0.3)
 
-        ax_twin.scatter([], [], s=1, alpha=point_alpha, color=np.array(point_color) / 255.0, label='1D Hidden State')
+        ax_twin.scatter([], [], s=3, alpha=point_alpha, color=np.array(point_color) / 255.0, label='1D Hidden State')
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax_twin.get_legend_handles_labels()
         ax.legend(lines1 + lines2, labels1 + labels2, loc="best",framealpha=0.5)

@@ -50,6 +50,29 @@ class LSTMTrainer:
             'grad_norms': []
         }
 
+    def _apply_warmup_lr(self, epoch: int) -> float:
+        """
+        Apply a simple linear warmup schedule by epoch.
+        Epoch 1 starts from base_lr * WARMUP_INIT_FACTOR, then linearly ramps to base_lr.
+        """
+        base_lr = float(config.LEARNING_RATE)
+        warmup_epochs = int(getattr(config, "WARMUP_EPOCHS", 0))
+        init_factor = float(getattr(config, "WARMUP_INIT_FACTOR", 0.2))
+
+        if warmup_epochs <= 0:
+            lr = base_lr
+        else:
+            init_factor = max(0.0, min(1.0, init_factor))
+            if epoch <= warmup_epochs:
+                progress = float(epoch - 1) / float(max(1, warmup_epochs - 1))
+                lr = base_lr * (init_factor + (1.0 - init_factor) * progress)
+            else:
+                lr = base_lr
+
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        return lr
+
     def load_weights_from_checkpoint(self, checkpoint_path):
         if not os.path.exists(checkpoint_path):
             print(f"Checkpoint not found: {checkpoint_path}")
@@ -183,11 +206,15 @@ class LSTMTrainer:
         torch.save(checkpoint, checkpoint_path)
         
         # Save best model
+        is_best = False
         if not hasattr(self, 'best_test_loss') or test_loss < self.best_test_loss:
             self.best_test_loss = test_loss
             self.best_epoch = epoch
             best_path = os.path.join(config.CHECKPOINT_PATH, 'best_model.pt')
             torch.save(checkpoint, best_path)
+            is_best = True
+
+        return is_best
     
     def save_training_history(self):
         """Save training history to JSON file"""
@@ -204,6 +231,8 @@ class LSTMTrainer:
         print("=" * 60)
         
         for epoch in range(1, max_epochs + 1):
+            current_lr = self._apply_warmup_lr(epoch)
+
             # Training
             train_loss, train_acc = self.train_epoch(epoch)
             
@@ -218,12 +247,15 @@ class LSTMTrainer:
             self.training_history['test_accuracy'].append(test_acc)
             
             # Save checkpoint
-            self.save_checkpoint(epoch, train_loss, test_loss, train_acc, test_acc)
+            is_best = self.save_checkpoint(epoch, train_loss, test_loss, train_acc, test_acc)
             
             # Print epoch summary
             print(f'Epoch {epoch:4d}: '
+                  f'LR: {current_lr:.6g}, '
                   f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
-                  f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%')
+                  f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%, '
+                  f'Best Epoch So Far: {self.best_epoch}'
+                  f'{"  <-- NEW BEST" if is_best else ""}')
             
             # Save history periodically
             if epoch % 10 == 0:

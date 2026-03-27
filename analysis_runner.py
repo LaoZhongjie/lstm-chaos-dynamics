@@ -62,6 +62,8 @@ class AnalysisRunner:
             'ftle_eps_values': self.ftle_eps_values,
             'ftle_window_lengths': self.ftle_window_lengths,
             'ftle_mean_by_window': [],
+            'ftle_mean_autonomous_by_window': [],
+            'ftle_mean_driven_by_window': [],
         }
 
     def load_data_and_model(self):
@@ -106,7 +108,8 @@ class AnalysisRunner:
         
     def _prepare_analysis_samples(self):
         sample_generator = self.seed_manager.torch_generator("analysis.sample_selection")
-        w0_generator = self.seed_manager.torch_generator("analysis.ftle.w0")
+        # Generators must match the device of tensors they fill (CUDA randn requires a CUDA generator).
+        w0_generator = self.seed_manager.torch_generator("analysis.ftle.w0", device=self.device)
 
         pad_token = 0
         
@@ -134,8 +137,25 @@ class AnalysisRunner:
         # LSTM: state is (h,c) -> 2H; GRU/RNN: state is h -> H.
         cell_type = getattr(self.model, "cell_type", "lstm").lower()
         state_dim = 2 * config.HIDDEN_SIZE if cell_type == "lstm" else config.HIDDEN_SIZE
-        w0 = torch.randn(n, state_dim, generator=w0_generator).to(self.device)
-        
+        w0 = torch.randn(n, state_dim, generator=w0_generator, device=self.device, dtype=torch.float32)
+
+        # Shared random RNN initial state for 0-input (before sequence), autonomous, and driven FTLE.
+        init_hc_generator = self.seed_manager.torch_generator("analysis.ftle.initial_hc", device=self.device)
+        init_scale = float(getattr(config, "FTLE_INIT_SCALE", 0.1))
+        hidden_size = config.HIDDEN_SIZE
+        if cell_type == "lstm":
+            h0 = init_scale * torch.randn(
+                1, n, hidden_size, generator=init_hc_generator, device=self.device, dtype=torch.float32
+            )
+            c0 = init_scale * torch.randn(
+                1, n, hidden_size, generator=init_hc_generator, device=self.device, dtype=torch.float32
+            )
+            self.ftle_initial_hc = (h0, c0)
+        else:
+            self.ftle_initial_hc = init_scale * torch.randn(
+                1, n, hidden_size, generator=init_hc_generator, device=self.device, dtype=torch.float32
+            )
+
         self.sample_indices = indices
         self.sample_tokens = tokens
         self.w0 = w0
@@ -215,9 +235,10 @@ class AnalysisRunner:
             epochs_to_analyze = list(range(start_epoch, end_epoch + 1, interval))
         
         bifurcation_data = []
-        
         ftle_mean_by_window = []
-        
+        ftle_mean_autonomous_by_window = []
+        ftle_mean_driven_by_window = []
+
         for epoch in tqdm(epochs_to_analyze, desc="Chaos analysis"):
             try:
                 checkpoint_path = os.path.join(config.CHECKPOINT_PATH, f'model_epoch_{epoch}.pt')
@@ -225,15 +246,36 @@ class AnalysisRunner:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
 
                 epoch_ftle_means = []
+                epoch_ftle_autonomous = []
+                epoch_ftle_driven = []
                 for eps_val in self.ftle_eps_values:
                     eps_row = []
+                    auto_row = []
+                    driven_row = []
                     for window_length in self.ftle_window_lengths:
-                        _, ftle_avg = self.ftle_analyzers[(eps_val, window_length)].compute_ftle_benettin(
-                            self.sample_tokens, w0=self.w0
+                        analyzer = self.ftle_analyzers[(eps_val, window_length)]
+                        _, ftle_avg = analyzer.compute_ftle_benettin(
+                            self.sample_tokens, w0=self.w0, initial_hc=self.ftle_initial_hc
                         )
+                        # _, ftle_auto = analyzer.compute_ftle_autonomous(
+                        #     self.sample_tokens.shape[0], w0=self.w0, initial_hc=self.ftle_initial_hc
+                        # )
+                        # _, ftle_driv = analyzer.compute_ftle_driven(
+                        #     self.sample_tokens,
+                        #     w0=self.w0,
+                        #     repeat_factor=getattr(config, 'FTLE_DRIVEN_REPEAT_FACTOR', 4),
+                        #     initial_hc=self.ftle_initial_hc,
+                        # )
                         eps_row.append(ftle_avg)
+                        # Keep array shape stable for downstream save/plot while disabling computation.
+                        auto_row.append(float("nan"))
+                        driven_row.append(float("nan"))
                     epoch_ftle_means.append(eps_row)
+                    epoch_ftle_autonomous.append(auto_row)
+                    epoch_ftle_driven.append(driven_row)
                 ftle_mean_by_window.append(epoch_ftle_means)
+                ftle_mean_autonomous_by_window.append(epoch_ftle_autonomous)
+                ftle_mean_driven_by_window.append(epoch_ftle_driven)
                 
                 h_states_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
                     self.test_dataset, self.sample_indices, epoch
@@ -247,13 +289,17 @@ class AnalysisRunner:
                 bifurcation_data.append([])
                 nan_row = [[float("nan")] * len(self.ftle_window_lengths) for _ in self.ftle_eps_values]
                 ftle_mean_by_window.append(nan_row)
-                
+                ftle_mean_autonomous_by_window.append(nan_row)
+                ftle_mean_driven_by_window.append(nan_row)
+
         self.results['analyzed_epochs'] = epochs_to_analyze
         self.results['bifurcation_data'] = bifurcation_data
         self.results['sample_indices'] = self.sample_indices
         self.results['ftle_eps_values'] = self.ftle_eps_values
         self.results['ftle_window_lengths'] = self.ftle_window_lengths
         self.results['ftle_mean_by_window'] = ftle_mean_by_window
+        self.results['ftle_mean_autonomous_by_window'] = ftle_mean_autonomous_by_window
+        self.results['ftle_mean_driven_by_window'] = ftle_mean_driven_by_window
         
         print(f"Calculated asymptotic distances for {len(epochs_to_analyze)} epochs")
         print("Results saved for manual inspection")
@@ -284,6 +330,8 @@ class AnalysisRunner:
                 'eps_values': self.results.get('ftle_eps_values', []),
                 'window_lengths': self.results.get('ftle_window_lengths', []),
                 'ftle_mean_by_window': self.results.get('ftle_mean_by_window', []),
+                'ftle_mean_autonomous_by_window': self.results.get('ftle_mean_autonomous_by_window', []),
+                'ftle_mean_driven_by_window': self.results.get('ftle_mean_driven_by_window', []),
             },
         }
         
@@ -314,6 +362,8 @@ class AnalysisRunner:
             'ftle_eps_values': np.float64,
             'ftle_window_lengths': np.int16,
             'ftle_mean_by_window': np.float32,
+            'ftle_mean_autonomous_by_window': np.float32,
+            'ftle_mean_driven_by_window': np.float32,
         }
         
         # 列表 → NumPy 数组

@@ -22,7 +22,8 @@ print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"Device: {torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')}")
 print(f"Random seed: {config.RANDOM_SEED}")
 print(f"Learning Rate: {config.LEARNING_RATE}")
-
+print(f"Embedding Size: {config.EMBEDDING_DIM}")
+print(f"Hidden Size: {config.HIDDEN_SIZE}")
 
 print(f"Data path: {config.DATA_PATH}")
 print(f"Results path: {config.RESULTS_PATH}")
