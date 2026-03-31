@@ -3,9 +3,9 @@ Configuration file for RNN chaos analysis experiment
 """
 # Training parameters
 BATCH_SIZE = 128
-MAX_EPOCHS = 2000
+MAX_EPOCHS = 1200
 SEQUENCE_LENGTH = 500
-EMBEDDING_DIM = 32
+EMBEDDING_DIM = 64
 MAX_VOCAB_SIZE = 4000
 NUM_CLASSES = 1
 
@@ -14,11 +14,13 @@ FC_FIX = False
 PRETRAINED_CHECKPOINT = 'checkpoints/pretrained_gru.pt'
 
 # RNN specific parameters
-HIDDEN_SIZE = 100
-LEARNING_RATE = 0.0003
+HIDDEN_SIZE = 128
+LEARNING_RATE = 3e-4
+WARMUP_EPOCHS = 100
+WARMUP_INIT_FACTOR = 0.01
 
 # RNN cell type: 'lstm', 'gru', or 'rnn'
-RNN_CELL_TYPE = 'gru'
+RNN_CELL_TYPE = 'rnn'
 
 # Data split
 TRAIN_RATIO = 0.7
@@ -30,12 +32,7 @@ NUM_TEST_SAMPLES = 500
 MACHINE_PRECISION_THRESHOLD = -15
 
 # FTLE (Benettin) parameters
-# - eps: initial perturbation magnitude (should be small, but not underflow)
-# - window_length: renormalize every N zero-drive steps
-# - burn_in: skip the first N zero-drive steps when accumulating the exponent
-# FTLE_EPS = [1e-6, 3e-6, 5e-6, 8e-6, 1e-5, 3e-5, 5e-5]
-# FTLE_WINDOW_LENGTHS = [3, 5, 7, 10, 13, 15]
-FTLE_EPS = [1e-6]
+FTLE_EPS = [1e-7, 4e-7, 7e-7, 1e-6, 4e-6, 7e-6, 1e-5, 4e-5, 7e-5, 1e-4]
 FTLE_WINDOW_LENGTHS = [10]
 FTLE_BURN_IN = 200
 

@@ -64,6 +64,9 @@ class AnalysisRunner:
             'ftle_mean_by_window': [],
             'ftle_mean_autonomous_by_window': [],
             'ftle_mean_driven_by_window': [],
+            'ftle_precision_underflow': [],
+            'ftle_precision_nonfinite': [],
+            'ftle_precision_total_checks': [],
         }
 
     def load_data_and_model(self):
@@ -238,6 +241,9 @@ class AnalysisRunner:
         ftle_mean_by_window = []
         ftle_mean_autonomous_by_window = []
         ftle_mean_driven_by_window = []
+        ftle_precision_underflow = []
+        ftle_precision_nonfinite = []
+        ftle_precision_total_checks = []
 
         for epoch in tqdm(epochs_to_analyze, desc="Chaos analysis"):
             try:
@@ -248,34 +254,39 @@ class AnalysisRunner:
                 epoch_ftle_means = []
                 epoch_ftle_autonomous = []
                 epoch_ftle_driven = []
+                epoch_underflow = []
+                epoch_nonfinite = []
+                epoch_total_checks = []
                 for eps_val in self.ftle_eps_values:
                     eps_row = []
                     auto_row = []
                     driven_row = []
+                    uf_row = []
+                    nf_row = []
+                    tc_row = []
                     for window_length in self.ftle_window_lengths:
                         analyzer = self.ftle_analyzers[(eps_val, window_length)]
-                        _, ftle_avg = analyzer.compute_ftle_benettin(
+                        _, ftle_avg, pstats = analyzer.compute_ftle_benettin(
                             self.sample_tokens, w0=self.w0, initial_hc=self.ftle_initial_hc
                         )
-                        # _, ftle_auto = analyzer.compute_ftle_autonomous(
-                        #     self.sample_tokens.shape[0], w0=self.w0, initial_hc=self.ftle_initial_hc
-                        # )
-                        # _, ftle_driv = analyzer.compute_ftle_driven(
-                        #     self.sample_tokens,
-                        #     w0=self.w0,
-                        #     repeat_factor=getattr(config, 'FTLE_DRIVEN_REPEAT_FACTOR', 4),
-                        #     initial_hc=self.ftle_initial_hc,
-                        # )
                         eps_row.append(ftle_avg)
-                        # Keep array shape stable for downstream save/plot while disabling computation.
+                        uf_row.append(pstats["underflow_count"])
+                        nf_row.append(pstats["nonfinite_count"])
+                        tc_row.append(pstats["total_checks"])
                         auto_row.append(float("nan"))
                         driven_row.append(float("nan"))
                     epoch_ftle_means.append(eps_row)
                     epoch_ftle_autonomous.append(auto_row)
                     epoch_ftle_driven.append(driven_row)
+                    epoch_underflow.append(uf_row)
+                    epoch_nonfinite.append(nf_row)
+                    epoch_total_checks.append(tc_row)
                 ftle_mean_by_window.append(epoch_ftle_means)
                 ftle_mean_autonomous_by_window.append(epoch_ftle_autonomous)
                 ftle_mean_driven_by_window.append(epoch_ftle_driven)
+                ftle_precision_underflow.append(epoch_underflow)
+                ftle_precision_nonfinite.append(epoch_nonfinite)
+                ftle_precision_total_checks.append(epoch_total_checks)
                 
                 h_states_all_samples = self.hiddenstate_analyzer.calculate_hidden_states(
                     self.test_dataset, self.sample_indices, epoch
@@ -288,9 +299,13 @@ class AnalysisRunner:
                 print(f"Checkpoint not found for epoch {epoch}")
                 bifurcation_data.append([])
                 nan_row = [[float("nan")] * len(self.ftle_window_lengths) for _ in self.ftle_eps_values]
+                zero_row = [[0] * len(self.ftle_window_lengths) for _ in self.ftle_eps_values]
                 ftle_mean_by_window.append(nan_row)
                 ftle_mean_autonomous_by_window.append(nan_row)
                 ftle_mean_driven_by_window.append(nan_row)
+                ftle_precision_underflow.append(zero_row)
+                ftle_precision_nonfinite.append(zero_row)
+                ftle_precision_total_checks.append(zero_row)
 
         self.results['analyzed_epochs'] = epochs_to_analyze
         self.results['bifurcation_data'] = bifurcation_data
@@ -300,11 +315,52 @@ class AnalysisRunner:
         self.results['ftle_mean_by_window'] = ftle_mean_by_window
         self.results['ftle_mean_autonomous_by_window'] = ftle_mean_autonomous_by_window
         self.results['ftle_mean_driven_by_window'] = ftle_mean_driven_by_window
+        self.results['ftle_precision_underflow'] = ftle_precision_underflow
+        self.results['ftle_precision_nonfinite'] = ftle_precision_nonfinite
+        self.results['ftle_precision_total_checks'] = ftle_precision_total_checks
         
         print(f"Calculated asymptotic distances for {len(epochs_to_analyze)} epochs")
         print("Results saved for manual inspection")
-        
+
+        self._print_precision_report(
+            epochs_to_analyze,
+            ftle_precision_underflow,
+            ftle_precision_nonfinite,
+            ftle_precision_total_checks,
+        )
+
         return epochs_to_analyze, bifurcation_data, ftle_mean_by_window
+
+    def _print_precision_report(
+        self, epochs, underflow, nonfinite, total_checks,
+    ):
+        """Print a summary table of all epochs that had underflow or non-finite events."""
+        print()
+        print("=" * 80)
+        print("FTLE Precision Report")
+        print("=" * 80)
+
+        any_issue = False
+        for ep_idx, epoch in enumerate(epochs):
+            for eps_idx, eps_val in enumerate(self.ftle_eps_values):
+                for w_idx, w_val in enumerate(self.ftle_window_lengths):
+                    uf = underflow[ep_idx][eps_idx][w_idx]
+                    nf = nonfinite[ep_idx][eps_idx][w_idx]
+                    tc = total_checks[ep_idx][eps_idx][w_idx]
+                    if uf > 0 or nf > 0:
+                        any_issue = True
+                        pct = 100.0 * (uf + nf) / tc if tc > 0 else 0.0
+                        print(
+                            f"  Epoch {epoch:>5d} | ε={eps_val:.0e}, w={w_val:>3d} | "
+                            f"underflow={uf:>6d}, nonfinite={nf:>6d}, "
+                            f"total_checks={tc:>8d}  ({pct:.2f}%)"
+                        )
+
+        if not any_issue:
+            print("  No underflow or non-finite events detected across all epochs.")
+
+        print("=" * 80)
+        print()
     
     def save_results(self):
         analyzed_epochs = self.results.get('analyzed_epochs', [])
@@ -332,6 +388,9 @@ class AnalysisRunner:
                 'ftle_mean_by_window': self.results.get('ftle_mean_by_window', []),
                 'ftle_mean_autonomous_by_window': self.results.get('ftle_mean_autonomous_by_window', []),
                 'ftle_mean_driven_by_window': self.results.get('ftle_mean_driven_by_window', []),
+                'precision_underflow': self.results.get('ftle_precision_underflow', []),
+                'precision_nonfinite': self.results.get('ftle_precision_nonfinite', []),
+                'precision_total_checks': self.results.get('ftle_precision_total_checks', []),
             },
         }
         
@@ -364,6 +423,9 @@ class AnalysisRunner:
             'ftle_mean_by_window': np.float32,
             'ftle_mean_autonomous_by_window': np.float32,
             'ftle_mean_driven_by_window': np.float32,
+            'ftle_precision_underflow': np.int32,
+            'ftle_precision_nonfinite': np.int32,
+            'ftle_precision_total_checks': np.int32,
         }
         
         # 列表 → NumPy 数组

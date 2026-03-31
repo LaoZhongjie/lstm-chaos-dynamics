@@ -58,6 +58,9 @@ class ResultsVisualizer:
             'ftle_mean_by_window',
             'ftle_mean_autonomous_by_window',
             'ftle_mean_driven_by_window',
+            'ftle_precision_underflow',
+            'ftle_precision_nonfinite',
+            'ftle_precision_total_checks',
         }
         def _load_h5(path):
             if not os.path.exists(path):
@@ -234,13 +237,17 @@ class ResultsVisualizer:
         n_eps = int(ftle_eps_values.size)
         n_windows = int(ftle_window_lengths.size)
 
-        # FTLE type colors and labels
-        FTLE_TYPE_STYLE = {
-            "0_input": {"color": "#2ca02c", "label": "FTLE 0-input", "desc": "shared random init, seq then zero input"},
-        }
-        window_shades = [1.00, 0.78, 0.60, 0.45]
+        n_ftle_curves = int(n_eps * n_windows)
+        # If there's only one FTLE curve, force green; otherwise use high-contrast colors.
+        _single_ftle_color = "green"
+        _linestyles = ["-", "--", "-.", ":"]
+        _contrast_palette = (
+            list(plt.cm.tab20.colors)
+            + list(getattr(plt.cm, "tab20b").colors)
+            + list(getattr(plt.cm, "tab20c").colors)
+        )
 
-        fig, ax1 = plt.subplots(figsize=(12, 6))
+        fig, ax1 = plt.subplots(figsize=(18, 6))
 
         lr = getattr(config, "LEARNING_RATE", None)
         ax1.plot(plot_epochs, plot_test_loss, color="brown", linewidth=1.2, label=f"Test Loss (lr={lr})")
@@ -251,7 +258,7 @@ class ResultsVisualizer:
                 label=f"Global Optimum (Epoch {global_opt_epoch})")
 
         seed = getattr(config, "RANDOM_SEED", None)
-        ax1.set_xlabel(f"Epochs (seed={seed}, lr={lr})", fontsize=16)
+        ax1.set_xlabel(f"Epochs (seed={seed}, lr={lr})", fontsize=16, labelpad=10)
         ax1.set_ylabel("Test Loss", color="brown", fontsize=16)
         ax1.tick_params(axis="y", labelcolor="brown")
         ax1.grid(True, alpha=0.3)
@@ -262,32 +269,29 @@ class ResultsVisualizer:
         ftle_handles = []
         ftle_labels = []
 
-        def _plot_ftle(data, style):
-            base_color = style["color"]
-            first_legend = True
+        def _plot_ftle(data):
+            """Plot FTLE curves with contrasting colors (or green if only one)."""
             for eps_idx, eps_val in enumerate(ftle_eps_values.tolist()):
                 for w_idx, window_length in enumerate(ftle_window_lengths.tolist()):
-                    if n_eps > 1:
-                        shade = float(window_shades[w_idx % len(window_shades)])
-                        rgb = np.array(mcolors.to_rgb(base_color), dtype=np.float32)
-                        color = tuple(np.clip(rgb * shade, 0.0, 1.0).tolist()) + (1.0,)
+                    combo_idx = eps_idx * n_windows + w_idx
+                    if n_ftle_curves == 1:
+                        color = _single_ftle_color
                     else:
-                        color = mcolors.to_rgba(base_color)
+                        color = _contrast_palette[combo_idx % len(_contrast_palette)]
+                    linestyle = _linestyles[w_idx % len(_linestyles)]
                     ax2.plot(
                         plot_analyzed_epochs,
                         data[:, eps_idx, w_idx],
                         color=color,
-                        linestyle='-',
-                        linewidth=1.0,
+                        linestyle=linestyle,
+                        linewidth=1.2,
                     )
-                    if first_legend:
-                        ftle_handles.append(Line2D([0], [0], color=color, lw=2.0, linestyle='-'))
-                        ftle_labels.append(style["label"])
-                        first_legend = False
+                    ftle_handles.append(Line2D([0], [0], color=color, lw=2.0, linestyle=linestyle))
+                    ftle_labels.append(f"FTLE (ε={eps_val:.0e}, w={int(window_length)})")
 
-        _plot_ftle(plot_ftle_mean_by_window, FTLE_TYPE_STYLE["0_input"])
+        _plot_ftle(plot_ftle_mean_by_window)
 
-        ax2.set_ylabel("FTLE", color="black", fontsize=16)
+        # ax2.set_ylabel("FTLE", color="black", fontsize=16)
         ax2.tick_params(axis="y", labelcolor="black")
         ax2.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
 
@@ -317,15 +321,11 @@ class ResultsVisualizer:
         ax2.axhspan(0, ymax, alpha=0.05, color="red")
         ax2.axhspan(ymin, 0, alpha=0.05, color="blue")
 
-        # Legend: main + FTLE entries + eps,w (once)
         main_handles, main_labels = ax1.get_legend_handles_labels()
-        eps_str = ",".join(f"{e:.0e}" for e in ftle_eps_values.tolist())
-        w_str = ",".join(str(int(w)) for w in ftle_window_lengths.tolist())
-        param_handle = Line2D([0], [0], color="none", lw=0, label=f"eps={eps_str}, w={w_str}")
-        handles = main_handles + ftle_handles + [param_handle]
-        labels = main_labels + ftle_labels + [param_handle.get_label()]
+        handles = main_handles + ftle_handles
+        labels = main_labels + ftle_labels
 
-        ax1.legend(handles, labels, loc="lower right", framealpha=0.9, fontsize=8)
+        ax1.legend(handles, labels, loc="best", framealpha=0.9, fontsize=8)
 
         cell_type = getattr(config, "RNN_CELL_TYPE", "lstm").upper()
         ax1.set_title(f"Test Loss vs. FTLE (Benettin) - {cell_type}", fontsize=18)
@@ -335,6 +335,78 @@ class ResultsVisualizer:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches="tight")
             print(f"✓ test_loss_with_ftle saved to {save_path}")
+
+        plt.show()
+
+    def plot_ftle_vs_eps(
+        self,
+        *,
+        checkpoint_epochs=(50, 100, 200, 400, 600, 800, 1000, 1200),
+        window_idx: int = 0,
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Plot FTLE as a function of eps for selected checkpoint epochs.
+
+        Each curve is one checkpoint; x-axis is eps, y-axis is mean FTLE.
+        """
+        print("Generating ftle_vs_eps plot...")
+        analyzed_epochs = np.asarray(self.results.get("analyzed_epochs", []))
+        ftle_eps_values = np.asarray(self.results.get("ftle_eps_values", []), dtype=np.float64)
+        ftle_window_lengths = np.asarray(self.results.get("ftle_window_lengths", []), dtype=np.int32)
+        ftle_mean_by_window = np.asarray(self.results.get("ftle_mean_by_window", []), dtype=np.float32)
+
+        if analyzed_epochs.size == 0 or ftle_eps_values.size == 0:
+            raise ValueError("Missing analyzed_epochs or ftle_eps_values data.")
+
+        if ftle_mean_by_window.ndim == 2:
+            ftle_eps_values = np.array([1e-3])
+            ftle_mean_by_window = ftle_mean_by_window[:, np.newaxis, :]
+        elif ftle_mean_by_window.ndim != 3:
+            raise ValueError("ftle_mean_by_window must be 2D or 3D.")
+
+        n_eps = ftle_eps_values.size
+        n_windows = ftle_window_lengths.size
+        if window_idx >= n_windows:
+            raise ValueError(f"window_idx={window_idx} out of range (n_windows={n_windows}).")
+
+        valid_len = min(analyzed_epochs.size, ftle_mean_by_window.shape[0])
+        analyzed_epochs = analyzed_epochs[:valid_len]
+        ftle_mean_by_window = ftle_mean_by_window[:valid_len, :, :]
+
+        epoch_to_idx = {int(e): i for i, e in enumerate(analyzed_epochs)}
+        selected = [(ep, epoch_to_idx[ep]) for ep in checkpoint_epochs if ep in epoch_to_idx]
+        if not selected:
+            available = sorted(epoch_to_idx.keys())
+            raise ValueError(
+                f"None of the requested checkpoint_epochs found in analyzed data. "
+                f"Available: {available[:20]}{'...' if len(available) > 20 else ''}"
+            )
+
+        _tab10 = plt.cm.tab10.colors
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for color_idx, (ep, row_idx) in enumerate(selected):
+            ftle_vals = ftle_mean_by_window[row_idx, :, window_idx]  # shape (n_eps,)
+            color = _tab10[color_idx % len(_tab10)]
+            ax.plot(ftle_eps_values, ftle_vals, marker='o', markersize=4,
+                    color=color, linewidth=1.5, label=f"Epoch {ep}")
+
+        ax.set_xscale("log")
+        ax.set_xlabel("ε (perturbation magnitude)", fontsize=14)
+        ax.set_ylabel("FTLE", fontsize=14)
+        w_val = int(ftle_window_lengths[window_idx]) if ftle_window_lengths.size > 0 else "?"
+        cell_type = getattr(config, "RNN_CELL_TYPE", "lstm").upper()
+        ax.set_title(f"FTLE vs ε  (window={w_val}) - {cell_type}", fontsize=16)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
+        ax.legend(loc="best", framealpha=0.9, fontsize=9)
+
+        plt.tight_layout()
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches="tight")
+            print(f"✓ ftle_vs_eps saved to {save_path}")
 
         plt.show()
 

@@ -75,7 +75,7 @@ class FTLEBenettinAnalyzer:
         *,
         w0: Optional[torch.Tensor] = None,
         initial_hc: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, float]:
+    ) -> Tuple[torch.Tensor, float, dict]:
         """
         Args:
             token_batch: LongTensor [B, T] on `self.device` (token indices).
@@ -88,6 +88,7 @@ class FTLEBenettinAnalyzer:
         Returns:
             ftle_per_sample: FloatTensor [B] (float32) on `self.device` (computed in float64, returned as float32).
             ftle_mean: Python float (mean over samples).
+            precision_stats: dict with keys 'underflow_count', 'nonfinite_count', 'total_checks'.
         """
         prev_mode = self.model.training
         self.model.eval()
@@ -151,10 +152,11 @@ class FTLEBenettinAnalyzer:
                 full_blocks, rem = divmod(self.zero_input_timesteps, self.window_length)
                 block_lengths = [self.window_length] * full_blocks + ([rem] if rem else [])
 
+                precision_stats = {"underflow_count": 0, "nonfinite_count": 0, "total_checks": 0}
+
                 if burn_blocks >= len(block_lengths):
-                    # Nothing left after burn-in; return zeros to make downstream handling easy.
                     ftle_zeros = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
-                    return ftle_zeros, 0.0
+                    return ftle_zeros, 0.0, precision_stats
 
                 # Effective time (in steps) used for the exponent average
                 t_eff = int(sum(block_lengths[burn_blocks:]))
@@ -211,7 +213,16 @@ class FTLEBenettinAnalyzer:
                         delta64 = torch.cat([dh, dc], dim=1)  # (B, 2H)
                     else:
                         delta64 = dh  # (B, H)
-                    r_t64 = delta64.norm(dim=1).clamp_min(self.clamp_min)  # (B,) float64
+                    r_t64_raw = delta64.norm(dim=1)  # (B,) float64, before clamping
+
+                    # Track precision violations
+                    if k >= burn_blocks:
+                        n_samples = int(r_t64_raw.shape[0])
+                        precision_stats["total_checks"] += n_samples
+                        precision_stats["underflow_count"] += int((r_t64_raw < self.clamp_min).sum().item())
+                        precision_stats["nonfinite_count"] += int((~torch.isfinite(r_t64_raw)).sum().item())
+
+                    r_t64 = r_t64_raw.clamp_min(self.clamp_min)
 
                     if k >= burn_blocks:
                         sum_logs += torch.log(r_t64 / eps64)
@@ -223,309 +234,329 @@ class FTLEBenettinAnalyzer:
                         h_p = h + eps_state * dir_vec_state[:, :hidden_size]
                         c_p = c + eps_state * dir_vec_state[:, hidden_size:]
                     else:
-                        # GRU / RNN: only hidden state is renormalized
                         h_p = h + eps_state * dir_vec_state
                         c_p = c
 
                 ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
                 ftle_mean = float(ftle_per_sample.mean().item())
-                return ftle_per_sample, ftle_mean
+                return ftle_per_sample, ftle_mean, precision_stats
         finally:
             if prev_mode:
                 self.model.train()
 
-    def compute_ftle_autonomous(
-        self,
-        batch_size: int,
-        *,
-        w0: Optional[torch.Tensor] = None,
-        init_scale: float = 0.1,
-        initial_hc: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, float]:
-        """
-        Autonomous FTLE: same zero-input Benettin flow, but with random initial state
-        (no token sequence). Measures intrinsic chaos of the autonomous dynamics
-        f(h, c; x=0) from random starting points.
+    # def compute_ftle_autonomous(
+    #     self,
+    #     batch_size: int,
+    #     *,
+    #     w0: Optional[torch.Tensor] = None,
+    #     init_scale: float = 0.1,
+    #     initial_hc: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+    # ) -> Tuple[torch.Tensor, float, dict]:
+    #     """
+    #     Autonomous FTLE: same zero-input Benettin flow, but with random initial state
+    #     (no token sequence). Measures intrinsic chaos of the autonomous dynamics
+    #     f(h, c; x=0) from random starting points.
 
-        Args:
-            batch_size: number of independent trajectories.
-            w0: optional initial direction [B, 2H] or [B, H]. If None, random per sample.
-            init_scale: scale for random initial (h, c) when initial_hc is None. Default 0.1.
-            initial_hc: If set, use this (h0, c0) instead of drawing a new random state (same layout as model.init_hidden).
+    #     Args:
+    #         batch_size: number of independent trajectories.
+    #         w0: optional initial direction [B, 2H] or [B, H]. If None, random per sample.
+    #         init_scale: scale for random initial (h, c) when initial_hc is None. Default 0.1.
+    #         initial_hc: If set, use this (h0, c0) instead of drawing a new random state (same layout as model.init_hidden).
 
-        Returns:
-            ftle_per_sample: [B] on device. ftle_mean: float.
-        """
-        prev_mode = self.model.training
-        self.model.eval()
+    #     Returns:
+    #         ftle_per_sample: [B] on device. ftle_mean: float.
+    #         precision_stats: dict with keys 'underflow_count', 'nonfinite_count', 'total_checks'.
+    #     """
+    #     prev_mode = self.model.training
+    #     self.model.eval()
 
-        try:
-            with torch.inference_mode():
-                hidden_size = getattr(self.model, "hidden_size", config.HIDDEN_SIZE)
+    #     try:
+    #         with torch.inference_mode():
+    #             hidden_size = getattr(self.model, "hidden_size", config.HIDDEN_SIZE)
 
-                # 1) Initial state: shared initial_hc or legacy random draw
-                if initial_hc is not None:
-                    h, c = self._unpack_initial_hc_to_batch(initial_hc, batch_size, hidden_size)
-                else:
-                    h = init_scale * torch.randn(
-                        batch_size, hidden_size,
-                        generator=self._autonomous_init_generator,
-                        device=self.device,
-                        dtype=torch.float32,
-                    )
-                    if self.cell_type == "lstm":
-                        c = init_scale * torch.randn(
-                            batch_size, hidden_size,
-                            generator=self._autonomous_init_generator,
-                            device=self.device,
-                            dtype=torch.float32,
-                        )
-                    else:
-                        c = torch.zeros_like(h)
+    #             # 1) Initial state: shared initial_hc or legacy random draw
+    #             if initial_hc is not None:
+    #                 h, c = self._unpack_initial_hc_to_batch(initial_hc, batch_size, hidden_size)
+    #             else:
+    #                 h = init_scale * torch.randn(
+    #                     batch_size, hidden_size,
+    #                     generator=self._autonomous_init_generator,
+    #                     device=self.device,
+    #                     dtype=torch.float32,
+    #                 )
+    #                 if self.cell_type == "lstm":
+    #                     c = init_scale * torch.randn(
+    #                         batch_size, hidden_size,
+    #                         generator=self._autonomous_init_generator,
+    #                         device=self.device,
+    #                         dtype=torch.float32,
+    #                     )
+    #                 else:
+    #                     c = torch.zeros_like(h)
 
-                # 2) Same w0/perturbation setup as 0-input
-                state_dim = 2 * hidden_size if self.cell_type == "lstm" else hidden_size
-                if w0 is None:
-                    w0 = torch.randn(
-                        batch_size, state_dim,
-                        generator=self._w0_generator,
-                        device=self.device,
-                        dtype=torch.float64,
-                    )
-                else:
-                    w0 = w0.to(device=self.device, dtype=torch.float64)
+    #             # 2) Same w0/perturbation setup as 0-input
+    #             state_dim = 2 * hidden_size if self.cell_type == "lstm" else hidden_size
+    #             if w0 is None:
+    #                 w0 = torch.randn(
+    #                     batch_size, state_dim,
+    #                     generator=self._w0_generator,
+    #                     device=self.device,
+    #                     dtype=torch.float64,
+    #                 )
+    #             else:
+    #                 w0 = w0.to(device=self.device, dtype=torch.float64)
 
-                if w0.ndim != 2 or w0.shape[0] != batch_size:
-                    raise ValueError(f"w0 must have shape [B, {state_dim}]; got {tuple(w0.shape)}.")
+    #             if w0.ndim != 2 or w0.shape[0] != batch_size:
+    #                 raise ValueError(f"w0 must have shape [B, {state_dim}]; got {tuple(w0.shape)}.")
 
-                if self.cell_type == "lstm":
-                    if w0.shape[1] == hidden_size:
-                        w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
-                    elif w0.shape[1] != 2 * hidden_size:
-                        raise ValueError(f"w0 must have shape [B, 2H] or [B, H]; got {tuple(w0.shape)}.")
-                else:
-                    if w0.shape[1] != hidden_size:
-                        raise ValueError(f"w0 must have shape [B, H]; got {tuple(w0.shape)}.")
+    #             if self.cell_type == "lstm":
+    #                 if w0.shape[1] == hidden_size:
+    #                     w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
+    #                 elif w0.shape[1] != 2 * hidden_size:
+    #                     raise ValueError(f"w0 must have shape [B, 2H] or [B, H]; got {tuple(w0.shape)}.")
+    #             else:
+    #                 if w0.shape[1] != hidden_size:
+    #                     raise ValueError(f"w0 must have shape [B, H]; got {tuple(w0.shape)}.")
 
-                w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
-                eps_state = self.eps.to(dtype=h.dtype)
-                w0_state = w0.to(dtype=h.dtype)
-                if self.cell_type == "lstm":
-                    h_p = h + eps_state * w0_state[:, :hidden_size]
-                    c_p = c + eps_state * w0_state[:, hidden_size:]
-                else:
-                    h_p = h + eps_state * w0_state
-                    c_p = c
+    #             w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    #             eps_state = self.eps.to(dtype=h.dtype)
+    #             w0_state = w0.to(dtype=h.dtype)
+    #             if self.cell_type == "lstm":
+    #                 h_p = h + eps_state * w0_state[:, :hidden_size]
+    #                 c_p = c + eps_state * w0_state[:, hidden_size:]
+    #             else:
+    #                 h_p = h + eps_state * w0_state
+    #                 c_p = c
 
-                # 3) Zero-input block schedule (same as 0-input FTLE)
-                burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
-                full_blocks, rem = divmod(self.zero_input_timesteps, self.window_length)
-                block_lengths = [self.window_length] * full_blocks + ([rem] if rem else [])
+    #             # 3) Zero-input block schedule (same as 0-input FTLE)
+    #             burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
+    #             full_blocks, rem = divmod(self.zero_input_timesteps, self.window_length)
+    #             block_lengths = [self.window_length] * full_blocks + ([rem] if rem else [])
 
-                if burn_blocks >= len(block_lengths):
-                    ftle_zeros = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
-                    return ftle_zeros, 0.0
+    #             precision_stats = {"underflow_count": 0, "nonfinite_count": 0, "total_checks": 0}
 
-                t_eff = int(sum(block_lengths[burn_blocks:]))
-                sum_logs = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
-                eps64 = self.eps
+    #             if burn_blocks >= len(block_lengths):
+    #                 ftle_zeros = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
+    #                 return ftle_zeros, 0.0, precision_stats
 
-                zero_full = torch.zeros(
-                    2 * batch_size, self.window_length, self.embedding_dim,
-                    device=self.device, dtype=h.dtype,
-                )
-                zero_rem = (
-                    torch.zeros(2 * batch_size, rem, self.embedding_dim, device=self.device, dtype=h.dtype)
-                    if rem else None
-                )
+    #             t_eff = int(sum(block_lengths[burn_blocks:]))
+    #             sum_logs = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
+    #             eps64 = self.eps
 
-                # 4) Benettin loop (zero input)
-                for k, block_len in enumerate(block_lengths):
-                    zero_block = zero_full if block_len == self.window_length else zero_rem
-                    assert zero_block is not None
+    #             zero_full = torch.zeros(
+    #                 2 * batch_size, self.window_length, self.embedding_dim,
+    #                 device=self.device, dtype=h.dtype,
+    #             )
+    #             zero_rem = (
+    #                 torch.zeros(2 * batch_size, rem, self.embedding_dim, device=self.device, dtype=h.dtype)
+    #                 if rem else None
+    #             )
 
-                    h_cat = torch.cat([h, h_p], dim=0).unsqueeze(0)
-                    if self.cell_type == "lstm":
-                        c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)
-                        _, (hc_out, cc_out) = self.model.rnn(zero_block, (h_cat, c_cat))
-                        hc_out, cc_out = hc_out.squeeze(0), cc_out.squeeze(0)
-                        h, h_p = hc_out[:batch_size], hc_out[batch_size:]
-                        c, c_p = cc_out[:batch_size], cc_out[batch_size:]
-                    else:
-                        _, h_out = self.model.rnn(zero_block, h_cat)
-                        h_out = h_out.squeeze(0)
-                        h, h_p = h_out[:batch_size], h_out[batch_size:]
-                        c, c_p = torch.zeros_like(h), torch.zeros_like(h_p)
+    #             # 4) Benettin loop (zero input)
+    #             for k, block_len in enumerate(block_lengths):
+    #                 zero_block = zero_full if block_len == self.window_length else zero_rem
+    #                 assert zero_block is not None
 
-                    dh = (h_p - h).to(torch.float64)
-                    if self.cell_type == "lstm":
-                        dc = (c_p - c).to(torch.float64)
-                        delta64 = torch.cat([dh, dc], dim=1)
-                    else:
-                        delta64 = dh
-                    r_t64 = delta64.norm(dim=1).clamp_min(self.clamp_min)
+    #                 h_cat = torch.cat([h, h_p], dim=0).unsqueeze(0)
+    #                 if self.cell_type == "lstm":
+    #                     c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)
+    #                     _, (hc_out, cc_out) = self.model.rnn(zero_block, (h_cat, c_cat))
+    #                     hc_out, cc_out = hc_out.squeeze(0), cc_out.squeeze(0)
+    #                     h, h_p = hc_out[:batch_size], hc_out[batch_size:]
+    #                     c, c_p = cc_out[:batch_size], cc_out[batch_size:]
+    #                 else:
+    #                     _, h_out = self.model.rnn(zero_block, h_cat)
+    #                     h_out = h_out.squeeze(0)
+    #                     h, h_p = h_out[:batch_size], h_out[batch_size:]
+    #                     c, c_p = torch.zeros_like(h), torch.zeros_like(h_p)
 
-                    if k >= burn_blocks:
-                        sum_logs += torch.log(r_t64 / eps64)
+    #                 dh = (h_p - h).to(torch.float64)
+    #                 if self.cell_type == "lstm":
+    #                     dc = (c_p - c).to(torch.float64)
+    #                     delta64 = torch.cat([dh, dc], dim=1)
+    #                 else:
+    #                     delta64 = dh
+    #                 r_t64_raw = delta64.norm(dim=1)
 
-                    dir_vec64 = delta64 / r_t64.unsqueeze(1)
-                    dir_vec_state = dir_vec64.to(dtype=h.dtype)
-                    if self.cell_type == "lstm":
-                        h_p = h + eps_state * dir_vec_state[:, :hidden_size]
-                        c_p = c + eps_state * dir_vec_state[:, hidden_size:]
-                    else:
-                        h_p = h + eps_state * dir_vec_state
-                        c_p = c
+    #                 if k >= burn_blocks:
+    #                     n_samples = int(r_t64_raw.shape[0])
+    #                     precision_stats["total_checks"] += n_samples
+    #                     precision_stats["underflow_count"] += int((r_t64_raw < self.clamp_min).sum().item())
+    #                     precision_stats["nonfinite_count"] += int((~torch.isfinite(r_t64_raw)).sum().item())
 
-                ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
-                ftle_mean = float(ftle_per_sample.mean().item())
-                return ftle_per_sample, ftle_mean
-        finally:
-            if prev_mode:
-                self.model.train()
+    #                 r_t64 = r_t64_raw.clamp_min(self.clamp_min)
 
-    def compute_ftle_driven(
-        self,
-        sample_tokens: torch.Tensor,
-        *,
-        w0: Optional[torch.Tensor] = None,
-        repeat_factor: Optional[int] = None,
-        initial_hc: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, float]:
-        """
-        Driven FTLE: Benettin along a trajectory driven by the token sequence.
-        The sequence is cycled (repeat_factor x) to reach ~zero_input_timesteps length.
-        Both reference and perturbed trajectories receive the SAME tokens at each step.
-        Initial state is zero by default, or initial_hc when provided (match 0-input / autonomous).
+    #                 if k >= burn_blocks:
+    #                     sum_logs += torch.log(r_t64 / eps64)
 
-        Args:
-            sample_tokens: LongTensor [B, T] token indices.
-            w0: optional direction [B, 2H] or [B, H]. If None, random per sample.
-            repeat_factor: times to repeat the sequence. If None, use ceil(zero_input_timesteps / T).
-            initial_hc: Optional (h0, c0) for LSTM or h0 for GRU/RNN, each (1, B, H). If None, zeros.
+    #                 dir_vec64 = delta64 / r_t64.unsqueeze(1)
+    #                 dir_vec_state = dir_vec64.to(dtype=h.dtype)
+    #                 if self.cell_type == "lstm":
+    #                     h_p = h + eps_state * dir_vec_state[:, :hidden_size]
+    #                     c_p = c + eps_state * dir_vec_state[:, hidden_size:]
+    #                 else:
+    #                     h_p = h + eps_state * dir_vec_state
+    #                     c_p = c
 
-        Returns:
-            ftle_per_sample: [B]. ftle_mean: float.
-        """
-        prev_mode = self.model.training
-        self.model.eval()
+    #             ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
+    #             ftle_mean = float(ftle_per_sample.mean().item())
+    #             return ftle_per_sample, ftle_mean, precision_stats
+    #     finally:
+    #         if prev_mode:
+    #             self.model.train()
 
-        try:
-            with torch.inference_mode():
-                batch_size, seq_len = sample_tokens.shape
-                hidden_size = getattr(self.model, "hidden_size", config.HIDDEN_SIZE)
+    # def compute_ftle_driven(
+    #     self,
+    #     sample_tokens: torch.Tensor,
+    #     *,
+    #     w0: Optional[torch.Tensor] = None,
+    #     repeat_factor: Optional[int] = None,
+    #     initial_hc: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+    # ) -> Tuple[torch.Tensor, float, dict]:
+    #     """
+    #     Driven FTLE: Benettin along a trajectory driven by the token sequence.
+    #     The sequence is cycled (repeat_factor x) to reach ~zero_input_timesteps length.
+    #     Both reference and perturbed trajectories receive the SAME tokens at each step.
+    #     Initial state is zero by default, or initial_hc when provided (match 0-input / autonomous).
 
-                # 1) Cycle tokens to reach zero_input_timesteps length
-                target_steps = self.zero_input_timesteps
-                if repeat_factor is None:
-                    repeat_factor = max(1, math.ceil(target_steps / seq_len))
-                n_repeat = repeat_factor
-                tokens_cycled = sample_tokens.repeat(1, n_repeat)  # [B, seq_len * n_repeat]
-                total_len = tokens_cycled.shape[1]
-                # Clip to target_steps for consistent comparison with 0-input
-                if total_len > target_steps:
-                    tokens_cycled = tokens_cycled[:, :target_steps]
-                total_len = tokens_cycled.shape[1]
+    #     Args:
+    #         sample_tokens: LongTensor [B, T] token indices.
+    #         w0: optional direction [B, 2H] or [B, H]. If None, random per sample.
+    #         repeat_factor: times to repeat the sequence. If None, use ceil(zero_input_timesteps / T).
+    #         initial_hc: Optional (h0, c0) for LSTM or h0 for GRU/RNN, each (1, B, H). If None, zeros.
 
-                # 2) Initial state (zeros or shared initial_hc)
-                if initial_hc is not None:
-                    h, c = self._unpack_initial_hc_to_batch(initial_hc, batch_size, hidden_size)
-                else:
-                    h = torch.zeros(batch_size, hidden_size, device=self.device, dtype=torch.float32)
-                    c = torch.zeros(batch_size, hidden_size, device=self.device, dtype=torch.float32)
+    #     Returns:
+    #         ftle_per_sample: [B]. ftle_mean: float.
+    #         precision_stats: dict with keys 'underflow_count', 'nonfinite_count', 'total_checks'.
+    #     """
+    #     prev_mode = self.model.training
+    #     self.model.eval()
 
-                # 3) w0 setup
-                state_dim = 2 * hidden_size if self.cell_type == "lstm" else hidden_size
-                if w0 is None:
-                    w0 = torch.randn(
-                        batch_size, state_dim,
-                        generator=self._w0_generator,
-                        device=self.device,
-                        dtype=torch.float64,
-                    )
-                else:
-                    w0 = w0.to(device=self.device, dtype=torch.float64)
+    #     try:
+    #         with torch.inference_mode():
+    #             batch_size, seq_len = sample_tokens.shape
+    #             hidden_size = getattr(self.model, "hidden_size", config.HIDDEN_SIZE)
 
-                if w0.ndim != 2 or w0.shape[0] != batch_size:
-                    raise ValueError(f"w0 must have shape [B, {state_dim}]; got {tuple(w0.shape)}.")
+    #             # 1) Cycle tokens to reach zero_input_timesteps length
+    #             target_steps = self.zero_input_timesteps
+    #             if repeat_factor is None:
+    #                 repeat_factor = max(1, math.ceil(target_steps / seq_len))
+    #             n_repeat = repeat_factor
+    #             tokens_cycled = sample_tokens.repeat(1, n_repeat)  # [B, seq_len * n_repeat]
+    #             total_len = tokens_cycled.shape[1]
+    #             # Clip to target_steps for consistent comparison with 0-input
+    #             if total_len > target_steps:
+    #                 tokens_cycled = tokens_cycled[:, :target_steps]
+    #             total_len = tokens_cycled.shape[1]
 
-                if self.cell_type == "lstm":
-                    if w0.shape[1] == hidden_size:
-                        w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
-                    elif w0.shape[1] != 2 * hidden_size:
-                        raise ValueError(f"w0 must have shape [B, 2H] or [B, H]; got {tuple(w0.shape)}.")
-                else:
-                    if w0.shape[1] != hidden_size:
-                        raise ValueError(f"w0 must have shape [B, H]; got {tuple(w0.shape)}.")
+    #             # 2) Initial state (zeros or shared initial_hc)
+    #             if initial_hc is not None:
+    #                 h, c = self._unpack_initial_hc_to_batch(initial_hc, batch_size, hidden_size)
+    #             else:
+    #                 h = torch.zeros(batch_size, hidden_size, device=self.device, dtype=torch.float32)
+    #                 c = torch.zeros(batch_size, hidden_size, device=self.device, dtype=torch.float32)
 
-                w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
-                eps_state = self.eps.to(dtype=h.dtype)
-                w0_state = w0.to(dtype=h.dtype)
-                if self.cell_type == "lstm":
-                    h_p = h + eps_state * w0_state[:, :hidden_size]
-                    c_p = c + eps_state * w0_state[:, hidden_size:]
-                else:
-                    h_p = h + eps_state * w0_state
-                    c_p = c
+    #             # 3) w0 setup
+    #             state_dim = 2 * hidden_size if self.cell_type == "lstm" else hidden_size
+    #             if w0 is None:
+    #                 w0 = torch.randn(
+    #                     batch_size, state_dim,
+    #                     generator=self._w0_generator,
+    #                     device=self.device,
+    #                     dtype=torch.float64,
+    #                 )
+    #             else:
+    #                 w0 = w0.to(device=self.device, dtype=torch.float64)
 
-                # 4) Block schedule over driven sequence
-                burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
-                full_blocks, rem = divmod(total_len, self.window_length)
-                block_lengths = [self.window_length] * full_blocks + ([rem] if rem else [])
+    #             if w0.ndim != 2 or w0.shape[0] != batch_size:
+    #                 raise ValueError(f"w0 must have shape [B, {state_dim}]; got {tuple(w0.shape)}.")
 
-                if burn_blocks >= len(block_lengths):
-                    ftle_zeros = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
-                    return ftle_zeros, 0.0
+    #             if self.cell_type == "lstm":
+    #                 if w0.shape[1] == hidden_size:
+    #                     w0 = torch.cat([w0, torch.zeros_like(w0)], dim=1)
+    #                 elif w0.shape[1] != 2 * hidden_size:
+    #                     raise ValueError(f"w0 must have shape [B, 2H] or [B, H]; got {tuple(w0.shape)}.")
+    #             else:
+    #                 if w0.shape[1] != hidden_size:
+    #                     raise ValueError(f"w0 must have shape [B, H]; got {tuple(w0.shape)}.")
 
-                t_eff = int(sum(block_lengths[burn_blocks:]))
-                sum_logs = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
-                eps64 = self.eps
+    #             w0 = w0 / w0.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    #             eps_state = self.eps.to(dtype=h.dtype)
+    #             w0_state = w0.to(dtype=h.dtype)
+    #             if self.cell_type == "lstm":
+    #                 h_p = h + eps_state * w0_state[:, :hidden_size]
+    #                 c_p = c + eps_state * w0_state[:, hidden_size:]
+    #             else:
+    #                 h_p = h + eps_state * w0_state
+    #                 c_p = c
 
-                # 5) Benettin loop with driven input
-                pos = 0
-                for k, block_len in enumerate(block_lengths):
-                    token_slice = tokens_cycled[:, pos : pos + block_len]  # [B, block_len]
-                    pos += block_len
-                    embedded = self.model.embedding(token_slice)  # [B, block_len, E]
-                    # Same input for base and perturbed: [2B, block_len, E]
-                    driven_block = embedded.repeat(2, 1, 1)
+    #             # 4) Block schedule over driven sequence
+    #             burn_blocks = math.ceil(self.burn_in / self.window_length) if self.burn_in > 0 else 0
+    #             full_blocks, rem = divmod(total_len, self.window_length)
+    #             block_lengths = [self.window_length] * full_blocks + ([rem] if rem else [])
 
-                    h_cat = torch.cat([h, h_p], dim=0).unsqueeze(0)
-                    if self.cell_type == "lstm":
-                        c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)
-                        _, (hc_out, cc_out) = self.model.rnn(driven_block, (h_cat, c_cat))
-                        hc_out, cc_out = hc_out.squeeze(0), cc_out.squeeze(0)
-                        h, h_p = hc_out[:batch_size], hc_out[batch_size:]
-                        c, c_p = cc_out[:batch_size], cc_out[batch_size:]
-                    else:
-                        _, h_out = self.model.rnn(driven_block, h_cat)
-                        h_out = h_out.squeeze(0)
-                        h, h_p = h_out[:batch_size], h_out[batch_size:]
-                        c, c_p = torch.zeros_like(h), torch.zeros_like(h_p)
+    #             precision_stats = {"underflow_count": 0, "nonfinite_count": 0, "total_checks": 0}
 
-                    dh = (h_p - h).to(torch.float64)
-                    if self.cell_type == "lstm":
-                        dc = (c_p - c).to(torch.float64)
-                        delta64 = torch.cat([dh, dc], dim=1)
-                    else:
-                        delta64 = dh
-                    r_t64 = delta64.norm(dim=1).clamp_min(self.clamp_min)
+    #             if burn_blocks >= len(block_lengths):
+    #                 ftle_zeros = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
+    #                 return ftle_zeros, 0.0, precision_stats
 
-                    if k >= burn_blocks:
-                        sum_logs += torch.log(r_t64 / eps64)
+    #             t_eff = int(sum(block_lengths[burn_blocks:]))
+    #             sum_logs = torch.zeros(batch_size, dtype=torch.float64, device=self.device)
+    #             eps64 = self.eps
 
-                    dir_vec64 = delta64 / r_t64.unsqueeze(1)
-                    dir_vec_state = dir_vec64.to(dtype=h.dtype)
-                    if self.cell_type == "lstm":
-                        h_p = h + eps_state * dir_vec_state[:, :hidden_size]
-                        c_p = c + eps_state * dir_vec_state[:, hidden_size:]
-                    else:
-                        h_p = h + eps_state * dir_vec_state
-                        c_p = c
+    #             # 5) Benettin loop with driven input
+    #             pos = 0
+    #             for k, block_len in enumerate(block_lengths):
+    #                 token_slice = tokens_cycled[:, pos : pos + block_len]  # [B, block_len]
+    #                 pos += block_len
+    #                 embedded = self.model.embedding(token_slice)  # [B, block_len, E]
+    #                 driven_block = embedded.repeat(2, 1, 1)
 
-                ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
-                ftle_mean = float(ftle_per_sample.mean().item())
-                return ftle_per_sample, ftle_mean
-        finally:
-            if prev_mode:
-                self.model.train()
+    #                 h_cat = torch.cat([h, h_p], dim=0).unsqueeze(0)
+    #                 if self.cell_type == "lstm":
+    #                     c_cat = torch.cat([c, c_p], dim=0).unsqueeze(0)
+    #                     _, (hc_out, cc_out) = self.model.rnn(driven_block, (h_cat, c_cat))
+    #                     hc_out, cc_out = hc_out.squeeze(0), cc_out.squeeze(0)
+    #                     h, h_p = hc_out[:batch_size], hc_out[batch_size:]
+    #                     c, c_p = cc_out[:batch_size], cc_out[batch_size:]
+    #                 else:
+    #                     _, h_out = self.model.rnn(driven_block, h_cat)
+    #                     h_out = h_out.squeeze(0)
+    #                     h, h_p = h_out[:batch_size], h_out[batch_size:]
+    #                     c, c_p = torch.zeros_like(h), torch.zeros_like(h_p)
+
+    #                 dh = (h_p - h).to(torch.float64)
+    #                 if self.cell_type == "lstm":
+    #                     dc = (c_p - c).to(torch.float64)
+    #                     delta64 = torch.cat([dh, dc], dim=1)
+    #                 else:
+    #                     delta64 = dh
+    #                 r_t64_raw = delta64.norm(dim=1)
+
+    #                 if k >= burn_blocks:
+    #                     n_samples = int(r_t64_raw.shape[0])
+    #                     precision_stats["total_checks"] += n_samples
+    #                     precision_stats["underflow_count"] += int((r_t64_raw < self.clamp_min).sum().item())
+    #                     precision_stats["nonfinite_count"] += int((~torch.isfinite(r_t64_raw)).sum().item())
+
+    #                 r_t64 = r_t64_raw.clamp_min(self.clamp_min)
+
+    #                 if k >= burn_blocks:
+    #                     sum_logs += torch.log(r_t64 / eps64)
+
+    #                 dir_vec64 = delta64 / r_t64.unsqueeze(1)
+    #                 dir_vec_state = dir_vec64.to(dtype=h.dtype)
+    #                 if self.cell_type == "lstm":
+    #                     h_p = h + eps_state * dir_vec_state[:, :hidden_size]
+    #                     c_p = c + eps_state * dir_vec_state[:, hidden_size:]
+    #                 else:
+    #                     h_p = h + eps_state * dir_vec_state
+    #                     c_p = c
+
+    #             ftle_per_sample = (sum_logs / float(t_eff)).to(torch.float32)
+    #             ftle_mean = float(ftle_per_sample.mean().item())
+    #             return ftle_per_sample, ftle_mean, precision_stats
+    #     finally:
+    #         if prev_mode:
+    #             self.model.train()

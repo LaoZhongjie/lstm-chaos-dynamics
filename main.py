@@ -141,6 +141,9 @@ class ExperimentRunner:
             max_epoch=visualization_epochs,
             start_epoch=start_epoch,
         )
+        ftle_vs_eps_path = os.path.join(figures_dir, 'ftle_vs_eps.png')
+        visualizer.plot_ftle_vs_eps(save_path=ftle_vs_eps_path)
+
         visualizer.plot_test_loss_bifurcation_animation_gpu(
             video_path=combined_anim_gpu_path,
             subsample_epochs=1,
